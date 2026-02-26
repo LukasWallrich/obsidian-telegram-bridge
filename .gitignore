@@ -1,0 +1,8 @@
+.env
+.venv/
+local/state.json
+local/poller.lock
+/tmp/bridge_*
+__pycache__/
+*.pyc
+.DS_Store
