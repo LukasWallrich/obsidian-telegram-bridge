@@ -27,7 +27,7 @@ import httpx
 # Allow running directly from local/ or from project root
 sys.path.insert(0, str(Path(__file__).parent))
 from config import settings
-from media import extract_pdf, extract_text_document, fetch_url, save_image, sha256_of, transcribe_voice
+from media import extract_pdf, extract_text_document, fetch_url, fetch_youtube_transcript, is_youtube_url, save_image, sha256_of, transcribe_voice
 
 logging.basicConfig(
     level=logging.INFO,
@@ -299,13 +299,21 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
 
     # Fetch URLs
     for url in urls:
-        fetched, failed = fetch_url(url)
+        if is_youtube_url(url):
+            fetched, failed = fetch_youtube_transcript(url)
+            if failed:
+                # Fall back to Jina Reader for page title/description
+                fetched, failed = fetch_url(url)
+        else:
+            fetched, failed = fetch_url(url)
         if failed:
             fetch_failed = True
             source_url_or_type = url
         else:
             content_parts.append(fetched)
             source_url_or_type = url
+            # Save fetched page as a markdown attachment
+            pending_attachments.append((".md", fetched.encode("utf-8")))
 
     # Add PDF texts
     content_parts.extend(pdf_texts)
@@ -343,16 +351,7 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
         )
     image_line_block = "\n".join(image_lines) if image_lines else ""
 
-    # Attachment embed instructions — filenames are determined after Claude picks a title
-    num_pdfs = sum(1 for ext, _ in pending_attachments if ext == ".pdf")
-    if num_pdfs:
-        pdf_line_block = (
-            f"There {'is' if num_pdfs == 1 else 'are'} {num_pdfs} PDF attachment(s) that will be saved to the vault. "
-            "Include the line `![[ATTACHMENT_PLACEHOLDER]]` in the note body after the summary — "
-            "the actual filename will be filled in automatically."
-        )
-    else:
-        pdf_line_block = ""
+    attachment_line_block = ""
 
     filled = (
         template
@@ -362,7 +361,7 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
         .replace("{source_id}", source_id)
         .replace("{date}", date_str)
         .replace("{datetime}", datetime_str)
-        .replace("{image_line_if_present}", (image_line_block + "\n" + pdf_line_block).strip())
+        .replace("{image_line_if_present}", (image_line_block + "\n" + attachment_line_block).strip())
         .replace("{resource_folder}", resource_folder)
     )
 
@@ -457,13 +456,13 @@ def process_session(session: list[dict]) -> None:
             saved_attachment_names.append(doc_name)
             logger.info("Attachment saved to %s", save_to)
 
-        # Replace placeholder in the saved note with actual attachment filenames
+        # Append attachment links to the end of the note
         if saved_attachment_names:
             note_path = Path(vault_path) / resource_folder / filename
             if note_path.exists():
                 note_content = note_path.read_text()
                 embed_lines = "\n".join(f"![[Attachments/{name}]]" for name in saved_attachment_names)
-                note_content = note_content.replace("![[ATTACHMENT_PLACEHOLDER]]", embed_lines)
+                note_content = note_content.rstrip("\n") + "\n\n" + embed_lines + "\n"
                 note_path.write_text(note_content)
 
         # Count related notes mentioned

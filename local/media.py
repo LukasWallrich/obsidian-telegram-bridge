@@ -12,12 +12,15 @@ Handlers:
 
 import hashlib
 import logging
+import re
 import tempfile
 from pathlib import Path
 
 import httpx
 import pdfplumber
 from openai import OpenAI
+from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api.formatters import TextFormatter
 
 from config import settings
 
@@ -90,6 +93,59 @@ def fetch_url(url: str) -> tuple[str | None, bool]:
         return text, False
     except Exception as exc:
         logger.warning("Jina fetch failed for %s: %s", url, exc)
+        return None, True
+
+
+_YOUTUBE_URL_RE = re.compile(
+    r"(?:https?://)?(?:www\.|m\.)?(?:youtube\.com/(?:watch|shorts|live|embed)|youtu\.be/)",
+)
+
+_VIDEO_ID_RE = re.compile(
+    r"(?:v=|youtu\.be/|shorts/|live/|embed/)([A-Za-z0-9_-]{11})",
+)
+
+YOUTUBE_MIN_LENGTH = 50  # shorter than Jina; short videos can have brief valid transcripts
+
+
+def is_youtube_url(url: str) -> bool:
+    """Return True if *url* points to a YouTube video page."""
+    return bool(_YOUTUBE_URL_RE.search(url))
+
+
+def extract_video_id(url: str) -> str | None:
+    """Extract the 11-char video ID from any YouTube URL format."""
+    m = _VIDEO_ID_RE.search(url)
+    return m.group(1) if m else None
+
+
+def fetch_youtube_transcript(url: str) -> tuple[str | None, bool]:
+    """
+    Fetch the transcript for a YouTube video.
+
+    Returns the same (content, fetch_failed) signature as fetch_url().
+    """
+    video_id = extract_video_id(url)
+    if not video_id:
+        logger.warning("Could not extract video ID from %s", url)
+        return None, True
+
+    try:
+        ytt = YouTubeTranscriptApi()
+        transcript = ytt.fetch(video_id)
+        text = TextFormatter().format_transcript(transcript)
+        if len(text) < YOUTUBE_MIN_LENGTH:
+            logger.warning("YouTube transcript too short (%d chars) for %s", len(text), url)
+            return None, True
+
+        language = transcript.language
+        header = (
+            f"[YouTube Video Transcript]\n"
+            f"URL: {url}\n"
+            f"Language: {language}\n\n"
+        )
+        return header + text, False
+    except Exception as exc:
+        logger.warning("YouTube transcript fetch failed for %s: %s", url, exc)
         return None, True
 
 
