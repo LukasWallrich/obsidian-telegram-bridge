@@ -4,15 +4,17 @@ Send a URL, PDF, image, or voice note to a Telegram bot. A structured Markdown n
 
 ## Status
 
-**Working end-to-end.** Tested 2026-02-26:
+**Working end-to-end.** Tested 2026-02-27:
 
 - URL sent via Telegram → Jina fetch → Claude summarises → note written to vault with correct frontmatter, dynamic tags, and wikilinks to related notes
-- PDF sent via Telegram → text extracted + PDF saved to `Attachments/` → note written with embedded PDF viewer (`![[Attachments/file.pdf]]`)
+- PDF sent via Telegram → text extracted + PDF saved to `Attachments/` → note written with embedded PDF viewer
+- Text documents (.md, .txt, etc.) → content extracted (with binary validation), saved to `Attachments/` with the note title as filename
+- Voice note → Whisper transcription → used as context for summarisation
 - `/save` command triggers immediate processing without waiting for session timeout
 - Nested Claude Code session issue resolved (strips `CLAUDECODE` env var before subprocess)
+- Non-interactive mode: Claude always produces a note, never asks clarifying questions
 
 **Not yet tested:**
-- Voice note transcription (Whisper)
 - Image handling (download → Claude vision)
 - launchd auto-polling daemon
 
@@ -31,13 +33,15 @@ local/poller.py
   3. Group messages into sessions (>5 min gap = new session)
   4. Skip sessions where last message <90s ago (still composing)
   5. For ready sessions:
-       a. Download media (voice→Whisper, PDF→Attachments/, image→/tmp)
+       a. Download media (voice→Whisper, PDF/text→deferred, image→/tmp)
        b. Fetch URL via Jina Reader (authenticated, with fallback)
        c. Write prompt to /tmp/bridge_prompt_<id>.md
        d. Pipe to: claude --print --dangerously-skip-permissions
        e. Parse "SAVED: <filename>" from stdout
-       f. Advance offset, save state.json
-       g. Reply on Telegram: "Saved: [[Note Title]] — N related notes linked"
+       f. Save deferred attachments to Attachments/ using note title
+       g. Replace attachment placeholders in the note
+       h. Advance offset, save state.json
+       i. Reply on Telegram: "Saved: [[Note Title]] — N related notes linked"
 ```
 
 **24-hour limitation**: Telegram drops unprocessed updates after 24h of the Mac being offline. Acceptable for typical use.
@@ -127,8 +131,9 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 ## What to Send
 
 - **URL** — fetched via Jina Reader, summarised by Claude
-- **PDF** — text extracted + original saved to `Attachments/`, embedded in note
-- **Voice note** — transcribed by Whisper, used as "why I saved this" context
+- **PDF** — text extracted + original saved to `Attachments/{note title}.pdf`, embedded in note
+- **Text documents** (.md, .txt, etc.) — content extracted and saved to `Attachments/{note title}.md`; files without a text extension default to `.md`
+- **Voice note** — transcribed by Whisper, used as context to guide summarisation; Claude generates a "why I saved this" purpose statement
 - **Image** — saved to vault, described by Claude vision
 - **Plain text** — used as context alongside other messages in the session
 - **Combinations** — URL + voice note in same session = summary + personal context
@@ -138,15 +143,13 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 ## Next Steps
 
 ### High priority
-- [ ] **Test voice transcription** — send an `.ogg` voice note, verify Whisper output and it populates the "Why I saved this" section
 - [ ] **Test image handling** — send a photo, verify it's saved to vault and described in the summary
 - [ ] **Install and verify launchd daemon** — run `bash install_launchd.sh`, check logs, confirm auto-polling works after reboot
 - [ ] **Test offline recovery** — stop launchd, send messages, restart Mac, confirm backlog is processed (within 24h window)
 
 ### Quality improvements
 - [ ] **Duplicate detection** — `source_id` (SHA-256) is already in frontmatter; add a pre-check that searches the vault for an existing note with the same `source_id` before creating a new one
-- [ ] **Better session feedback** — send a Telegram acknowledgement ("⏳ Processing...") when a session starts processing, not just when it finishes
-- [ ] **URL in PDF filename** — when a PDF is downloaded from a URL message (not uploaded directly), use the URL's filename or title rather than `attachment_<id>.pdf`
+- [ ] **Better session feedback** — send a Telegram acknowledgement when a session starts processing, not just when it finishes
 
 ### Phase 2 features
 - [ ] **`/find <query>`** — semantic search over vault, reply with top matching note titles
@@ -165,7 +168,7 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 
 **Lock file stuck after crash**: `rm local/poller.lock`
 
-**`SAVED:` line missing from Claude output**: Claude failed to write the file — check `OBSIDIAN_VAULT_PATH` exists and `OBSIDIAN_RESOURCE_FOLDER` subfolder is writable.
+**`SAVED:` line missing from Claude output**: The poller now handles this gracefully — it sends the LLM response to Telegram and advances the offset. Check `OBSIDIAN_VAULT_PATH` exists and `OBSIDIAN_RESOURCE_FOLDER` subfolder is writable.
 
 **No updates found**: Verify you're messaging the right bot (`/getMe` returns the bot username). Updates older than 24h are dropped by Telegram.
 

@@ -1,6 +1,8 @@
 You are saving a resource to an Obsidian vault for personal knowledge management.
 Your working directory is the vault root. Use your file tools to read existing notes.
 
+IMPORTANT: This is a non-interactive, automated pipeline. You MUST always create a note and output a SAVED: line. NEVER ask clarifying questions, request confirmation, or suggest alternatives. If content is missing, incomplete, or ambiguous, save the note anyway using whatever information is available. Make reasonable assumptions and note any gaps in the summary.
+
 ---
 RESOURCE CONTENT:
 {content_or_fetch_failed_message}
@@ -15,8 +17,8 @@ DATE: {date}
 ---
 
 TASK:
-1. Search the vault for the 3–5 most relevant existing notes (read files, check headings/tags).
-2. Write a concise summary (3–8 sentences) emphasising what is useful given the stated reason for saving.
+1. Search the vault for the 3–5 most relevant existing notes (read files, check headings/tags). Read their content so you understand what they cover.
+2. Write the summary (see template below). Format it for skimming: use short paragraphs, bold key terms, and subheadings where appropriate.
 3. Generate tags dynamically from the content (e.g. [resource, machine-learning, python]).
 4. Create the note at: {resource_folder}/{date} {sanitised_title}.md
 
@@ -24,6 +26,10 @@ Title sanitisation rules:
 - No slashes, colons, pipes, question marks, or asterisks
 - Maximum 60 characters
 - Title case
+
+Link format rules:
+- Use short Obsidian links with filename only: [[Note Title]], NOT [[path/to/Note Title]]
+- Obsidian resolves filenames automatically, so paths are unnecessary
 
 Use this EXACT template (do not add sections or deviate from frontmatter keys):
 ---
@@ -37,11 +43,15 @@ tags: [resource, <dynamic tags>]
 # {Title}
 
 > [!note] Why I saved this
-> {voice_context_or_none_text}
+> {write a 1-2 sentence reason for saving, inferred from the voice/text context. Rephrase instructions or prompts into a purpose statement, e.g. "To prepare a lecture on X" not "Summarize this and give me tasks". If no context was provided, write "No context provided."}
+
+## Key Takeaways
+
+- {2–5 bullet points capturing the most important ideas at a glance}
 
 ## Summary
 
-{summary}
+{A substantial summary of several well-structured paragraphs. Emphasise what is useful given the stated reason for saving. Use bold for key terms, short paragraphs, and subheadings (###) to break up longer summaries. Where relevant, explicitly note how this resource relates to, extends, or contrasts with existing vault notes — e.g. "Unlike [[Note X]] which focuses on …, this takes the approach of …" or "This complements [[Note Y]] by adding …".}
 
 ## Related Notes
 
