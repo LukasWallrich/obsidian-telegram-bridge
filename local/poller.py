@@ -27,7 +27,7 @@ import httpx
 # Allow running directly from local/ or from project root
 sys.path.insert(0, str(Path(__file__).parent))
 from config import settings
-from media import extract_pdf, fetch_url, save_image, sha256_of, transcribe_voice
+from media import extract_pdf, extract_text_document, fetch_url, save_image, sha256_of, transcribe_voice
 
 logging.basicConfig(
     level=logging.INFO,
@@ -219,7 +219,7 @@ def handle_commands(
 # ---------------------------------------------------------------------------
 
 
-def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> str:
+def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> tuple[str, list[str], list[tuple[str, str]]]:
     template = PROMPT_TEMPLATE.read_text()
 
     now = datetime.now(timezone.utc)
@@ -231,9 +231,10 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
     plain_texts: list[str] = []
     image_paths: list[str] = []
     pdf_texts: list[str] = []
-    pdf_attachment_paths: list[str] = []  # vault-relative paths of saved PDFs
     fetch_failed = False
     content_parts: list[str] = []
+    unsupported_docs: list[str] = []
+    pending_attachments: list[tuple[str, bytes]] = []  # (extension, raw_bytes) — saved after title is known
     source_url_or_type = "attachment"
     source_id = ""
 
@@ -254,21 +255,32 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
             path = save_image(best["file_id"], update_id)
             image_paths.append(path)
 
-        # Document (PDF or other)
+        # Document (PDF, text-based, or other)
         elif "document" in msg:
             doc = msg["document"]
             mime = doc.get("mime_type", "")
+            original_name = doc.get("file_name", f"attachment_{update_id}")
             if mime == "application/pdf":
                 logger.info("Extracting PDF text...")
-                original_name = doc.get("file_name", f"attachment_{update_id}.pdf")
-                attachments_dir = Path(vault_path) / "Attachments"
-                save_to = attachments_dir / original_name
-                text = extract_pdf(doc["file_id"], save_to=save_to)
+                text, pdf_bytes = extract_pdf(doc["file_id"])
                 pdf_texts.append(text)
-                pdf_attachment_paths.append(f"Attachments/{original_name}")
+                pending_attachments.append((".pdf", pdf_bytes))
                 source_url_or_type = "pdf"
             else:
-                logger.warning("Unsupported document mime_type: %s", mime)
+                # Try to read as a text document
+                logger.info("Attempting text extraction for %s (mime: %s)", original_name, mime)
+                text = extract_text_document(doc["file_id"], original_name)
+                if text is not None:
+                    # Determine file extension; default to .md
+                    name_path = Path(original_name)
+                    ext = name_path.suffix if name_path.suffix not in ("", ".") else ".md"
+                    logger.info("Extracted text from %s (%d chars)", original_name, len(text))
+                    pending_attachments.append((ext, text.encode("utf-8")))
+                    content_parts.append(f"--- Content of {original_name} ---\n{text}")
+                    source_url_or_type = f"document:{original_name}"
+                else:
+                    logger.warning("Unsupported document: %s (mime: %s)", original_name, mime)
+                    unsupported_docs.append(original_name)
 
         # Text message — may contain a URL or be plain context
         elif "text" in msg or "caption" in msg:
@@ -322,7 +334,6 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
 
     # Voice / context
     voice_context = "\n".join(voice_texts + plain_texts) if (voice_texts or plain_texts) else "No context provided"
-    voice_context_note = voice_context  # used in template body
 
     # Image line
     image_lines = []
@@ -332,17 +343,21 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
         )
     image_line_block = "\n".join(image_lines) if image_lines else ""
 
-    # PDF attachment line (vault-relative paths, embedded in the note)
-    pdf_lines = []
-    for p in pdf_attachment_paths:
-        pdf_lines.append(f"The original PDF has been saved to the vault at `{p}`. Include `![[{p}]]` as a line in the note body, after the summary.")
-    pdf_line_block = "\n".join(pdf_lines) if pdf_lines else ""
+    # Attachment embed instructions — filenames are determined after Claude picks a title
+    num_pdfs = sum(1 for ext, _ in pending_attachments if ext == ".pdf")
+    if num_pdfs:
+        pdf_line_block = (
+            f"There {'is' if num_pdfs == 1 else 'are'} {num_pdfs} PDF attachment(s) that will be saved to the vault. "
+            "Include the line `![[ATTACHMENT_PLACEHOLDER]]` in the note body after the summary — "
+            "the actual filename will be filled in automatically."
+        )
+    else:
+        pdf_line_block = ""
 
     filled = (
         template
         .replace("{content_or_fetch_failed_message}", content_block)
         .replace("{voice_context_or_none}", voice_context)
-        .replace("{voice_context_or_none_text}", voice_context_note)
         .replace("{source_url_or_type}", source_url_or_type)
         .replace("{source_id}", source_id)
         .replace("{date}", date_str)
@@ -351,7 +366,7 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
         .replace("{resource_folder}", resource_folder)
     )
 
-    return filled
+    return filled, unsupported_docs, pending_attachments
 
 
 # ---------------------------------------------------------------------------
@@ -384,11 +399,11 @@ def invoke_claude(prompt: str, session_id: int, vault_path: str) -> str:
         tmp_path.unlink(missing_ok=True)
 
 
-def parse_saved_filename(stdout: str) -> str:
+def parse_saved_filename(stdout: str) -> str | None:
     for line in stdout.splitlines():
         if line.startswith("SAVED:"):
             return line.split(":", 1)[1].strip()
-    raise ValueError(f"No SAVED: line in output:\n{stdout[:500]}")
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -409,15 +424,52 @@ def process_session(session: list[dict]) -> None:
     logger.info("Processing session %s (%d messages)", session_id, len(session))
 
     try:
-        prompt = build_prompt(session, resource_folder, vault_path)
+        prompt, unsupported_docs, pending_attachments = build_prompt(session, resource_folder, vault_path)
+        if unsupported_docs:
+            names = ", ".join(unsupported_docs)
+            send_message(chat_id, f"Skipped unsupported file(s): {names}")
         stdout = invoke_claude(prompt, session_id, vault_path)
         filename = parse_saved_filename(stdout)
+
+        if filename is None:
+            logger.warning(
+                "Claude did not return SAVED: line for session %s. Output: %s",
+                session_id,
+                stdout[:500],
+            )
+            send_message(
+                chat_id,
+                f"Note processing failed — Claude did not save a file. Response:\n{stdout[:300]}",
+            )
+            return
+
+        note_title = Path(filename).stem
+
+        # Save pending attachments with the note title
+        attachments_dir = Path(vault_path) / "Attachments"
+        attachments_dir.mkdir(parents=True, exist_ok=True)
+        saved_attachment_names: list[str] = []
+        for i, (ext, raw_bytes) in enumerate(pending_attachments):
+            suffix = f" ({i + 1})" if len(pending_attachments) > 1 else ""
+            doc_name = f"{note_title}{suffix}{ext}"
+            save_to = attachments_dir / doc_name
+            save_to.write_bytes(raw_bytes)
+            saved_attachment_names.append(doc_name)
+            logger.info("Attachment saved to %s", save_to)
+
+        # Replace placeholder in the saved note with actual attachment filenames
+        if saved_attachment_names:
+            note_path = Path(vault_path) / resource_folder / filename
+            if note_path.exists():
+                note_content = note_path.read_text()
+                embed_lines = "\n".join(f"![[Attachments/{name}]]" for name in saved_attachment_names)
+                note_content = note_content.replace("![[ATTACHMENT_PLACEHOLDER]]", embed_lines)
+                note_path.write_text(note_content)
 
         # Count related notes mentioned
         related_count = stdout.count("[[") - stdout.count("[[Note Title]]")
         related_count = max(0, related_count)
 
-        note_title = Path(filename).stem
         reply = f"Saved: [[{note_title}]]"
         if related_count:
             reply += f" — {related_count} related note{'s' if related_count > 1 else ''} linked"

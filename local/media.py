@@ -6,6 +6,7 @@ Handlers:
   - URL: Jina Reader fetch → Markdown text (or fetch_failed flag)
   - PDF: download → pdfplumber text extraction
   - Image: download → save to /tmp/bridge_img_{update_id}.jpg → local path
+  - Text documents (.md, .txt, etc.): download → validate text → content string
   - Plain text: pass through
 """
 
@@ -92,17 +93,12 @@ def fetch_url(url: str) -> tuple[str | None, bool]:
         return None, True
 
 
-def extract_pdf(file_id: str, save_to: Path | None = None) -> str:
+def extract_pdf(file_id: str) -> tuple[str, bytes]:
     """
     Download a Telegram PDF and extract its text with pdfplumber.
-    If save_to is given, also persist the original PDF bytes there.
+    Returns (extracted_text, raw_pdf_bytes).
     """
     pdf_bytes = _download_bytes(file_id)
-
-    if save_to is not None:
-        save_to.parent.mkdir(parents=True, exist_ok=True)
-        save_to.write_bytes(pdf_bytes)
-        logger.info("PDF saved to %s", save_to)
 
     with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
         tmp.write(pdf_bytes)
@@ -115,9 +111,42 @@ def extract_pdf(file_id: str, save_to: Path | None = None) -> str:
                 text = page.extract_text()
                 if text:
                     pages.append(text)
-        return "\n\n".join(pages)
+        return "\n\n".join(pages), pdf_bytes
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+def extract_text_document(file_id: str, filename: str) -> str | None:
+    """
+    Download a Telegram document and try to read it as text.
+    Returns the text content, or None if the file doesn't appear to be text.
+    """
+    raw = _download_bytes(file_id)
+
+    # Quick binary check: if >10% of the first 1024 bytes are non-text
+    # control characters, it's probably not a text file.
+    sample = raw[:1024]
+    if not sample:
+        return None
+    non_text = sum(
+        1 for b in sample
+        if b < 0x09 or (0x0E <= b < 0x20 and b != 0x1B)
+    )
+    if non_text / len(sample) > 0.10:
+        logger.info("File %s looks binary (%d%% control chars), skipping", filename, int(non_text / len(sample) * 100))
+        return None
+
+    # Try to decode as UTF-8, fall back to latin-1
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("latin-1")
+        except UnicodeDecodeError:
+            logger.info("File %s could not be decoded as text", filename)
+            return None
+
+    return text
 
 
 def save_image(file_id: str, update_id: int) -> str:
