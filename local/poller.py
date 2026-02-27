@@ -28,6 +28,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).parent))
 from config import settings
 from media import extract_pdf, extract_text_document, fetch_url, fetch_youtube_transcript, is_youtube_url, save_image, sha256_of, transcribe_voice
+from search import collect_vault_tags, search_vault
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,12 +118,20 @@ def get_updates(offset: int) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 
-def group_into_sessions(updates: list[dict]) -> list[list[dict]]:
+def group_into_sessions(
+    updates: list[dict],
+    split_after_update_ids: set[int] | None = None,
+) -> list[list[dict]]:
     """
     Group updates from the allowed user into sessions.
-    A new session starts when there is a >SESSION_GAP second gap between messages.
+    A new session starts when:
+      - there is a >SESSION_GAP second gap between messages, OR
+      - the previous update_id is in split_after_update_ids (e.g. a /save command
+        was between these messages, so they belong to separate sessions).
     Updates from other senders are silently dropped.
     """
+    split_ids = split_after_update_ids or set()
+
     allowed_updates = []
     for upd in updates:
         msg = upd.get("message") or upd.get("edited_message")
@@ -144,7 +153,13 @@ def group_into_sessions(updates: list[dict]) -> list[list[dict]]:
         msg = upd.get("message") or upd.get("edited_message") or {}
         prev_msg = current_session[-1].get("message") or current_session[-1].get("edited_message") or {}
         gap = msg.get("date", 0) - prev_msg.get("date", 0)
-        if gap > SESSION_GAP:
+
+        # Split on time gap OR if a /save command fell between these two updates
+        prev_id = current_session[-1]["update_id"]
+        cur_id = upd["update_id"]
+        save_between = any(prev_id < sid < cur_id for sid in split_ids)
+
+        if gap > SESSION_GAP or save_between:
             sessions.append(current_session)
             current_session = [upd]
         else:
@@ -166,6 +181,27 @@ def session_max_update_id(session: list[dict]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Todo inbox
+# ---------------------------------------------------------------------------
+
+
+def process_todo_message(task_text: str, chat_id: int) -> None:
+    """Append a checkbox task to the todo inbox note."""
+    inbox_path = Path(settings.obsidian_vault_path) / settings.obsidian_todo_inbox
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    task_line = f"- [ ] {task_text}  _(added {date_str})_\n"
+
+    if inbox_path.exists():
+        content = inbox_path.read_text()
+        inbox_path.write_text(content.rstrip("\n") + "\n" + task_line)
+    else:
+        inbox_path.write_text(f"# Todo Inbox\n\n{task_line}")
+
+    logger.info("Todo added to %s: %s", inbox_path, task_text[:80])
+    send_message(chat_id, f"Added to todo inbox: {task_text}")
+
+
+# ---------------------------------------------------------------------------
 # Command handling
 # ---------------------------------------------------------------------------
 
@@ -174,10 +210,13 @@ def handle_commands(
     updates: list[dict],
     force_ready_chat_ids: set[int],
     cleared_chat_ids: set[int],
+    save_update_ids: set[int],
 ) -> list[dict]:
     """
     Process bot commands. Returns remaining (non-command) updates.
-    Modifies force_ready_chat_ids and cleared_chat_ids in place.
+    Modifies force_ready_chat_ids, cleared_chat_ids, and save_update_ids in place.
+    save_update_ids collects update_ids of /save commands so they can be used
+    as session split points.
     """
     remaining = []
     for upd in updates:
@@ -195,19 +234,45 @@ def handle_commands(
 
         if text.startswith("/save"):
             force_ready_chat_ids.add(chat_id)
+            save_update_ids.add(upd["update_id"])
             send_message(chat_id, "Processing current session immediately...")
         elif text.startswith("/clear"):
             cleared_chat_ids.add(chat_id)
             send_message(chat_id, "Session cleared. Start a new message to begin a fresh session.")
+        elif text.startswith("/find"):
+            query = text[len("/find"):].strip()
+            if not query:
+                send_message(chat_id, "Usage: /find <query>\nExample: /find reproducibility")
+            else:
+                try:
+                    results = search_vault(query, str(settings.obsidian_vault_path), top_k=5)
+                    if not results:
+                        send_message(chat_id, f'No results for "{query}". Is Smart Connections configured?')
+                    else:
+                        lines = [f'Found {len(results)} notes matching "{query}":\n']
+                        for i, r in enumerate(results, 1):
+                            lines.append(f"{i}. [[{r['title']}]] ({r['score']:.2f})")
+                        send_message(chat_id, "\n".join(lines))
+                except Exception as exc:
+                    logger.exception("Search failed for query: %s", query)
+                    send_message(chat_id, f"Search error: {exc}")
         elif text.startswith("/help"):
             send_message(
                 chat_id,
                 "Commands:\n"
                 "/save — process current session immediately\n"
                 "/clear — discard current session\n"
+                "/find <query> — search vault notes by semantic similarity\n"
                 "/help — show this message\n\n"
-                "Send a URL, voice note, image, or PDF to save a resource to your Obsidian vault.",
+                "Send a URL, voice note, image, or PDF to save a resource to your Obsidian vault.\n"
+                "Start a message with 'todo: ' to add a task directly to your todo inbox.",
             )
+        elif text.lower().startswith("todo:"):
+            task_text = text[5:].strip()
+            if task_text:
+                process_todo_message(task_text, chat_id)
+            else:
+                send_message(chat_id, "Usage: todo: <task description>")
         else:
             remaining.append(upd)
 
@@ -252,8 +317,12 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
         elif "photo" in msg:
             # Telegram sends multiple resolutions; use the largest
             best = max(msg["photo"], key=lambda p: p.get("file_size", 0))
-            path = save_image(best["file_id"], update_id)
+            path, img_bytes = save_image(best["file_id"], update_id)
             image_paths.append(path)
+            pending_attachments.append((".jpg", img_bytes))
+            caption = msg.get("caption", "")
+            if caption:
+                plain_texts.append(caption)
 
         # Document (PDF, text-based, or other)
         elif "document" in msg:
@@ -347,11 +416,36 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
     image_lines = []
     for p in image_paths:
         image_lines.append(
-            f"There is an image at {p}. Use your Read tool to view it and describe its content in the summary."
+            f"There is an image at {p}. Use your Read tool to view it. "
+            f"Default to a concise description or summary of its content — do NOT transcribe it in full "
+            f"unless the user context explicitly requests transcription or text extraction."
         )
     image_line_block = "\n".join(image_lines) if image_lines else ""
 
     attachment_line_block = ""
+
+    # Semantic search for related notes
+    related_notes_block = ""
+    try:
+        search_query = " ".join(content_parts[:3])[:1000] if content_parts else voice_context
+        if search_query and search_query != "No context provided":
+            results = search_vault(search_query, vault_path, top_k=10)
+            if results:
+                lines = ["## Existing vault notes most related to this content (by semantic similarity):"]
+                for i, r in enumerate(results, 1):
+                    lines.append(f"{i}. {r['path']} ({r['score']:.2f})")
+                related_notes_block = "\n".join(lines)
+    except Exception:
+        logger.exception("Semantic search failed during prompt building — continuing without")
+
+    # Collect existing vault tags for reuse
+    existing_tags_block = ""
+    try:
+        tags = [t for t in collect_vault_tags(vault_path) if t not in ("resource", "reading-list")]
+        if tags:
+            existing_tags_block = "Existing vault tags: " + ", ".join(tags)
+    except Exception:
+        logger.exception("Tag collection failed — continuing without")
 
     filled = (
         template
@@ -363,6 +457,8 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
         .replace("{datetime}", datetime_str)
         .replace("{image_line_if_present}", (image_line_block + "\n" + attachment_line_block).strip())
         .replace("{resource_folder}", resource_folder)
+        .replace("{related_notes}", related_notes_block)
+        .replace("{existing_tags}", existing_tags_block)
     )
 
     return filled, unsupported_docs, pending_attachments
@@ -382,7 +478,7 @@ def invoke_claude(prompt: str, session_id: int, vault_path: str) -> str:
         env.pop("CLAUDECODE", None)  # allow nested invocation from within a Claude Code session
         with open(tmp_path) as f:
             result = subprocess.run(
-                ["claude", "--print", "--dangerously-skip-permissions"],
+                ["claude", "--print", "--dangerously-skip-permissions", "--model", "claude-sonnet-4-6"],
                 stdin=f,
                 capture_output=True,
                 text=True,
@@ -458,7 +554,12 @@ def process_session(session: list[dict]) -> None:
 
         # Append attachment links to the end of the note
         if saved_attachment_names:
-            note_path = Path(vault_path) / resource_folder / filename
+            # Use basename only — Claude sometimes returns the full relative path in SAVED:
+            note_path = Path(vault_path) / resource_folder / Path(filename).name
+            if not note_path.exists():
+                logger.warning(
+                    "Note file not found at %s — attachment links not appended", note_path
+                )
             if note_path.exists():
                 note_content = note_path.read_text()
                 embed_lines = "\n".join(f"![[Attachments/{name}]]" for name in saved_attachment_names)
@@ -508,9 +609,10 @@ def run_poll() -> None:
 
     force_ready_chat_ids: set[int] = set()
     cleared_chat_ids: set[int] = set()
+    save_update_ids: set[int] = set()
 
     # Handle commands first; get back non-command updates
-    remaining = handle_commands(updates, force_ready_chat_ids, cleared_chat_ids)
+    remaining = handle_commands(updates, force_ready_chat_ids, cleared_chat_ids, save_update_ids)
 
     # Advance offset past all command updates (they're fully handled)
     command_update_ids = {
@@ -519,7 +621,7 @@ def run_poll() -> None:
     if command_update_ids:
         last_offset = max(last_offset, max(command_update_ids))
 
-    sessions = group_into_sessions(remaining)
+    sessions = group_into_sessions(remaining, split_after_update_ids=save_update_ids)
     logger.info("Grouped %d updates into %d session(s)", len(remaining), len(sessions))
 
     for session in sessions:

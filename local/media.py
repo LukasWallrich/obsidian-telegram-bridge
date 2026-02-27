@@ -149,10 +149,14 @@ def fetch_youtube_transcript(url: str) -> tuple[str | None, bool]:
         return None, True
 
 
+MAX_PDF_PAGES = 35  # hard limit to avoid oversized prompts
+
+
 def extract_pdf(file_id: str) -> tuple[str, bytes]:
     """
     Download a Telegram PDF and extract its text with pdfplumber.
     Returns (extracted_text, raw_pdf_bytes).
+    Text extraction is limited to the first MAX_PDF_PAGES pages.
     """
     pdf_bytes = _download_bytes(file_id)
 
@@ -163,11 +167,22 @@ def extract_pdf(file_id: str) -> tuple[str, bytes]:
     try:
         pages = []
         with pdfplumber.open(tmp_path) as pdf:
-            for page in pdf.pages:
+            total_pages = len(pdf.pages)
+            pages_to_read = pdf.pages[:MAX_PDF_PAGES]
+            if total_pages > MAX_PDF_PAGES:
+                logger.warning(
+                    "PDF has %d pages — extracting only first %d",
+                    total_pages,
+                    MAX_PDF_PAGES,
+                )
+            for page in pages_to_read:
                 text = page.extract_text()
                 if text:
                     pages.append(text)
-        return "\n\n".join(pages), pdf_bytes
+        text = "\n\n".join(pages)
+        if total_pages > MAX_PDF_PAGES:
+            text += f"\n\n[Note: PDF has {total_pages} pages; only the first {MAX_PDF_PAGES} were extracted.]"
+        return text, pdf_bytes
     finally:
         tmp_path.unlink(missing_ok=True)
 
@@ -205,13 +220,13 @@ def extract_text_document(file_id: str, filename: str) -> str | None:
     return text
 
 
-def save_image(file_id: str, update_id: int) -> str:
-    """Download a Telegram image and save it to /tmp. Returns the local path."""
+def save_image(file_id: str, update_id: int) -> tuple[str, bytes]:
+    """Download a Telegram image and save it to /tmp. Returns (local_path, image_bytes)."""
     img_bytes = _download_bytes(file_id)
     dest = Path(f"/tmp/bridge_img_{update_id}.jpg")
     dest.write_bytes(img_bytes)
     logger.info("Image saved to %s", dest)
-    return str(dest)
+    return str(dest), img_bytes
 
 
 def sha256_of(text: str) -> str:

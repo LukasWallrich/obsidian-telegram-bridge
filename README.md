@@ -10,12 +10,12 @@ Send a URL, PDF, image, or voice note to a Telegram bot. A structured Markdown n
 - PDF sent via Telegram → text extracted + PDF saved to `Attachments/` → note written with embedded PDF viewer
 - Text documents (.md, .txt, etc.) → content extracted (with binary validation), saved to `Attachments/` with the note title as filename
 - Voice note → Whisper transcription → used as context for summarisation
+- Image sent via Telegram → saved to `Attachments/` + described by Claude vision; caption passed as context; full transcription only if explicitly requested
 - `/save` command triggers immediate processing without waiting for session timeout
 - Nested Claude Code session issue resolved (strips `CLAUDECODE` env var before subprocess)
 - Non-interactive mode: Claude always produces a note, never asks clarifying questions
 
 **Not yet tested:**
-- Image handling (download → Claude vision)
 - launchd auto-polling daemon
 
 ---
@@ -95,7 +95,11 @@ cp .env.example .env
 #          JINA_API_KEY, OBSIDIAN_VAULT_PATH
 ```
 
-### 5. Test manually
+### 5. Smart Connections (required for semantic search)
+
+Install the [Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) Obsidian plugin and let it build embeddings. The bridge uses its `TaylorAI/bge-micro-v2` embeddings for the `/find` command and for linking related notes during note creation. The ONNX model (~20 MB) is downloaded automatically on first use.
+
+### 6. Test manually
 
 ```bash
 source .venv/bin/activate
@@ -104,7 +108,7 @@ python local/poller.py
 
 Send a URL to your bot. After 90 seconds (or after sending `/save`), run again and check your vault.
 
-### 6. Install launchd daemon
+### 7. Install launchd daemon
 
 ```bash
 bash install_launchd.sh
@@ -126,6 +130,7 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 |---------|--------|
 | `/save` | Process current session immediately |
 | `/clear` | Discard current session |
+| `/find <query>` | Search vault notes by semantic similarity |
 | `/help` | Show command list |
 
 ## What to Send
@@ -134,7 +139,7 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 - **PDF** — text extracted + original saved to `Attachments/{note title}.pdf`, embedded in note
 - **Text documents** (.md, .txt, etc.) — content extracted and saved to `Attachments/{note title}.md`; files without a text extension default to `.md`
 - **Voice note** — transcribed by Whisper, used as context to guide summarisation; Claude generates a "why I saved this" purpose statement
-- **Image** — saved to vault, described by Claude vision
+- **Image** — saved to `Attachments/{note title}.jpg`, described by Claude vision (summary by default; add "transcribe" to caption to extract full text); caption passed as context
 - **Plain text** — used as context alongside other messages in the session
 - **Combinations** — URL + voice note in same session = summary + personal context
 
@@ -143,7 +148,6 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 ## Next Steps
 
 ### High priority
-- [ ] **Test image handling** — send a photo, verify it's saved to vault and described in the summary
 - [ ] **Install and verify launchd daemon** — run `bash install_launchd.sh`, check logs, confirm auto-polling works after reboot
 - [ ] **Test offline recovery** — stop launchd, send messages, restart Mac, confirm backlog is processed (within 24h window)
 
@@ -152,7 +156,8 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 - [ ] **Better session feedback** — send a Telegram acknowledgement when a session starts processing, not just when it finishes
 
 ### Phase 2 features
-- [ ] **`/find <query>`** — semantic search over vault, reply with top matching note titles
+- [x] **`/find <query>`** — semantic search over vault using Smart Connections embeddings
+- [x] **Semantic related notes** — note creation uses embedding similarity to find related notes
 - [ ] **YouTube support** — `yt-dlp` transcript extraction for YouTube URLs
 - [ ] **Webhook fallback** — small Cloudflare Worker to extend beyond the 24h offline limit
 
