@@ -37,7 +37,7 @@ source: {source_url_or_type}
 source_id: {source_id}
 date: {date}
 type: resource
-tags: [resource, <dynamic tags>]
+tags: [resource, reading-list, <dynamic tags>]
 ---
 
 # {Title}
