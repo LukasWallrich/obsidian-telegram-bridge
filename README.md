@@ -133,12 +133,26 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 | `/find <query>` | Search vault notes by semantic similarity |
 | `/help` | Show command list |
 
+## Todo Inbox
+
+Send a text message or voice note starting with any of these openers to append a task directly to your todo inbox (no Claude invocation, no note created):
+
+| Opener | Example |
+|--------|---------|
+| `todo:` | `todo: email Sarah about the proposal` |
+| `to do:` / `to-do:` | `to do: review chapter 3` |
+| `add todo:` / `add a todo:` | `add a todo: book dentist` |
+| `task:` | `task: update dependencies` |
+| `reminder:` | `reminder: call back at 3pm` |
+
+Voice notes work identically — just say one of the openers at the start. If a session contains a voice todo alongside other content (e.g. a URL), the todo is added to the inbox and the URL is saved as a note separately.
+
 ## What to Send
 
 - **URL** — fetched via Jina Reader, summarised by Claude
 - **PDF** — text extracted + original saved to `Attachments/{note title}.pdf`, embedded in note
 - **Text documents** (.md, .txt, etc.) — content extracted and saved to `Attachments/{note title}.md`; files without a text extension default to `.md`
-- **Voice note** — transcribed by Whisper, used as context to guide summarisation; Claude generates a "why I saved this" purpose statement
+- **Voice note** — transcribed by Whisper, used as context to guide summarisation; Claude generates a "why I saved this" purpose statement. Start with a todo opener (see below) to add a task directly to your inbox instead.
 - **Image** — saved to `Attachments/{note title}.jpg`, described by Claude vision (summary by default; add "transcribe" to caption to extract full text); caption passed as context
 - **Plain text** — used as context alongside other messages in the session
 - **Combinations** — URL + voice note in same session = summary + personal context

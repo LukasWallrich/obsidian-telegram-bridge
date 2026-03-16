@@ -14,12 +14,16 @@ SOURCE: {source_url_or_type}
 SOURCE_ID: {source_id}
 DATE: {date}
 {image_line_if_present}
+
+{related_notes}
+
+{existing_tags}
 ---
 
 TASK:
-1. Search the vault for the 3–5 most relevant existing notes (read files, check headings/tags). Read their content so you understand what they cover.
+1. Review the semantically related notes listed above (if any). Read the top 3–5 most relevant ones to understand what they cover.
 2. Write the summary (see template below). Format it for skimming: use short paragraphs, bold key terms, and subheadings where appropriate.
-3. Generate tags dynamically from the content (e.g. [resource, machine-learning, python]).
+3. Pick 3–5 tags from the existing vault tags listed above. Only create a new tag if the content covers a topic not represented by any existing tag. Do NOT use "resource" or "reading-list" as they are already in the template.
 4. Create the note at: {resource_folder}/{date} {sanitised_title}.md
 
 Title sanitisation rules:
@@ -37,7 +41,7 @@ source: {source_url_or_type}
 source_id: {source_id}
 date: {date}
 type: resource
-tags: [resource, reading-list, <dynamic tags>]
+tags: [resource, reading-list, <3–5 tags from existing vault tags, plus at most 1 new if essential>]
 ---
 
 # {Title}

@@ -3,6 +3,7 @@
 local/state.json
 local/poller.lock
 /tmp/bridge_*
+local/models/
 __pycache__/
 *.pyc
 .DS_Store

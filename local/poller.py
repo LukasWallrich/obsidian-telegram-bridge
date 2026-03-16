@@ -47,6 +47,13 @@ PROMPT_TEMPLATE = BASE_DIR / "prompts" / "note_prompt.md"
 TELEGRAM_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 SESSION_GAP = 300  # seconds — gap between messages that starts a new session
 
+# Matches voice-todo openers: "todo: …", "to do: …", "to-do: …",
+# "add (a) todo: …", "task: …", "reminder: …"
+_TODO_RE = re.compile(
+    r"^(todo|to[\s\-]do|add (a )?to[\s\-]?do|task|reminder)[:\s]+",
+    re.IGNORECASE,
+)
+
 # ---------------------------------------------------------------------------
 # Lock
 # ---------------------------------------------------------------------------
@@ -201,6 +208,50 @@ def process_todo_message(task_text: str, chat_id: int) -> None:
     send_message(chat_id, f"Added to todo inbox: {task_text}")
 
 
+def process_image_todo(file_id: str, update_id: int, chat_id: int) -> None:
+    """Download image, ask Claude to extract todo items, add them to the inbox."""
+    path, _ = save_image(file_id, update_id)
+    tmp_path = Path(f"/tmp/bridge_todo_img_{update_id}.md")
+    vault_path = str(settings.obsidian_vault_path)
+    try:
+        prompt = (
+            f"Use your Read tool to view the image at {path}.\n\n"
+            f"Extract all to-do items, tasks, checklist items, or reminders visible in the image.\n"
+            f"Return each item on a separate line starting with '- '.\n"
+            f"If there are no to-do items in the image, return exactly: NO_TODOS"
+        )
+        tmp_path.write_text(prompt)
+        env = os.environ.copy()
+        env.pop("CLAUDECODE", None)
+        with open(tmp_path) as f:
+            result = subprocess.run(
+                ["claude", "--print", "--dangerously-skip-permissions", "--model", "claude-sonnet-4-6"],
+                stdin=f,
+                capture_output=True,
+                text=True,
+                timeout=120,
+                cwd=vault_path,
+                env=env,
+            )
+
+        if result.returncode != 0:
+            logger.error("Claude stderr: %s", result.stderr[:500])
+            send_message(chat_id, "Failed to extract todos from image.")
+            return
+
+        todos = [line[2:].strip() for line in result.stdout.splitlines() if line.startswith("- ")]
+        if not todos:
+            send_message(chat_id, "No to-do items found in the image.")
+            return
+
+        for task_text in todos:
+            process_todo_message(task_text, chat_id)
+
+    finally:
+        tmp_path.unlink(missing_ok=True)
+        Path(f"/tmp/bridge_img_{update_id}.jpg").unlink(missing_ok=True)
+
+
 # ---------------------------------------------------------------------------
 # Command handling
 # ---------------------------------------------------------------------------
@@ -265,7 +316,8 @@ def handle_commands(
                 "/find <query> — search vault notes by semantic similarity\n"
                 "/help — show this message\n\n"
                 "Send a URL, voice note, image, or PDF to save a resource to your Obsidian vault.\n"
-                "Start a message with 'todo: ' to add a task directly to your todo inbox.",
+                "Start a message with 'todo: ' to add a task directly to your todo inbox.\n"
+                "Send a photo with caption starting 'todo' to extract tasks from the image.",
             )
         elif text.lower().startswith("todo:"):
             task_text = text[5:].strip()
@@ -273,6 +325,9 @@ def handle_commands(
                 process_todo_message(task_text, chat_id)
             else:
                 send_message(chat_id, "Usage: todo: <task description>")
+        elif msg.get("photo") and msg.get("caption", "").lower().startswith("todo"):
+            best = max(msg["photo"], key=lambda p: p.get("file_size", 0))
+            process_image_todo(best["file_id"], upd["update_id"], chat_id)
         else:
             remaining.append(upd)
 
@@ -293,6 +348,7 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
 
     urls: list[str] = []
     voice_texts: list[str] = []
+    voice_todo_texts: list[str] = []
     plain_texts: list[str] = []
     image_paths: list[str] = []
     pdf_texts: list[str] = []
@@ -311,7 +367,12 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
         if "voice" in msg:
             logger.info("Transcribing voice note...")
             text = transcribe_voice(msg["voice"]["file_id"])
-            voice_texts.append(text)
+            m = _TODO_RE.match(text)
+            if m:
+                voice_todo_texts.append(text[m.end():].strip())
+                logger.info("Voice todo detected: %s", text[:80])
+            else:
+                voice_texts.append(text)
 
         # Photo / image
         elif "photo" in msg:
@@ -461,7 +522,8 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
         .replace("{existing_tags}", existing_tags_block)
     )
 
-    return filled, unsupported_docs, pending_attachments
+    has_saveable_content = bool(urls or pdf_texts or image_paths or plain_texts or voice_texts)
+    return filled, unsupported_docs, pending_attachments, voice_todo_texts, has_saveable_content
 
 
 # ---------------------------------------------------------------------------
@@ -519,10 +581,22 @@ def process_session(session: list[dict]) -> None:
     logger.info("Processing session %s (%d messages)", session_id, len(session))
 
     try:
-        prompt, unsupported_docs, pending_attachments = build_prompt(session, resource_folder, vault_path)
+        prompt, unsupported_docs, pending_attachments, todo_texts, has_saveable_content = build_prompt(
+            session, resource_folder, vault_path
+        )
+
+        # Handle voice todos immediately, independently of any other content
+        for task_text in todo_texts:
+            process_todo_message(task_text, chat_id)
+
         if unsupported_docs:
             names = ", ".join(unsupported_docs)
             send_message(chat_id, f"Skipped unsupported file(s): {names}")
+
+        # Nothing left to summarise — all content was voice todos
+        if not has_saveable_content:
+            return
+
         stdout = invoke_claude(prompt, session_id, vault_path)
         filename = parse_saved_filename(stdout)
 
@@ -570,9 +644,26 @@ def process_session(session: list[dict]) -> None:
         related_count = stdout.count("[[") - stdout.count("[[Note Title]]")
         related_count = max(0, related_count)
 
+        # Read saved note to include in reply
+        note_path_for_reply = Path(vault_path) / resource_folder / Path(filename).name
+        note_body = ""
+        if note_path_for_reply.exists():
+            note_body = note_path_for_reply.read_text()
+            # Strip YAML frontmatter
+            if note_body.startswith("---"):
+                end = note_body.find("---", 3)
+                if end != -1:
+                    note_body = note_body[end + 3:].strip()
+
         reply = f"Saved: [[{note_title}]]"
         if related_count:
             reply += f" — {related_count} related note{'s' if related_count > 1 else ''} linked"
+        if note_body:
+            # Telegram message limit is 4096 chars; leave room for header
+            max_body = 4096 - len(reply) - 10
+            if len(note_body) > max_body:
+                note_body = note_body[:max_body] + "…"
+            reply += f"\n\n{note_body}"
 
         send_message(chat_id, reply)
         logger.info("Session %s → %s", session_id, filename)
@@ -581,6 +672,14 @@ def process_session(session: list[dict]) -> None:
         logger.exception("Failed to process session %s", session_id)
         if chat_id:
             send_message(chat_id, f"Error saving note: {exc}")
+        # Record backoff on quota/rate-limit errors or any Claude failure
+        exc_str = str(exc).lower()
+        is_quota = any(kw in exc_str for kw in ("quota", "rate", "limit", "429", "overloaded", "capacity"))
+        backoff_seconds = 900 if is_quota else 900  # 15 min either way — be conservative
+        state = load_state()
+        state["backoff_until"] = time.time() + backoff_seconds
+        save_state(state)
+        logger.info("Backoff set for %d seconds (quota-related: %s)", backoff_seconds, is_quota)
         raise
 
     finally:
@@ -599,6 +698,13 @@ def process_session(session: list[dict]) -> None:
 def run_poll() -> None:
     state = load_state()
     last_offset = state.get("last_offset", 0)
+
+    # Check backoff — skip this poll if we're still in a cooldown period
+    backoff_until = state.get("backoff_until", 0)
+    if time.time() < backoff_until:
+        remaining = int(backoff_until - time.time())
+        logger.info("In backoff period (%d seconds remaining). Skipping poll.", remaining)
+        return
 
     logger.info("Polling with offset=%s", last_offset + 1)
     updates = get_updates(last_offset + 1)
@@ -651,7 +757,7 @@ def run_poll() -> None:
         process_session(session)
         last_offset = max(last_offset, session_max_update_id(session))
 
-    save_state({"last_offset": last_offset})
+    save_state({"last_offset": last_offset, "backoff_until": 0})
     logger.info("State saved with last_offset=%s", last_offset)
 
 
