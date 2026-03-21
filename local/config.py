@@ -19,5 +19,8 @@ class Settings(BaseSettings):
     obsidian_todo_inbox: str = "todo-inbox.md"
     session_timeout_seconds: int = 90
 
+    pages_repo_path: Path | None = None
+    pages_base_url: str = ""
+
 
 settings = Settings()

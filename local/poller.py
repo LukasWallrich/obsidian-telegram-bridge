@@ -28,6 +28,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).parent))
 from config import settings
 from media import extract_pdf, extract_text_document, fetch_url, fetch_youtube_transcript, is_youtube_url, save_image, sha256_of, transcribe_voice
+from pages import git_commit_and_push, publish_note
 from search import collect_vault_tags, search_vault
 
 logging.basicConfig(
@@ -652,26 +653,68 @@ def process_session(session: list[dict]) -> None:
         related_count = stdout.count("[[") - stdout.count("[[Note Title]]")
         related_count = max(0, related_count)
 
-        # Read saved note to include in reply
+        # Publish to GitHub Pages (if configured)
         note_path_for_reply = Path(vault_path) / resource_folder / Path(filename).name
-        note_body = ""
-        if note_path_for_reply.exists():
-            note_body = note_path_for_reply.read_text()
-            # Strip YAML frontmatter
-            if note_body.startswith("---"):
-                end = note_body.find("---", 3)
-                if end != -1:
-                    note_body = note_body[end + 3:].strip()
+        pages_url = None
+        if settings.pages_repo_path and settings.pages_base_url:
+            try:
+                pages_url = publish_note(
+                    note_path_for_reply,
+                    settings.pages_repo_path,
+                    settings.pages_base_url,
+                    Path(vault_path),
+                )
+                if pages_url:
+                    git_commit_and_push(
+                        settings.pages_repo_path,
+                        f"Publish: {note_title}",
+                    )
+            except Exception:
+                logger.exception("GitHub Pages publish failed for %s — continuing", note_title)
 
+        # Build reply
         reply = f"Saved: [[{note_title}]]"
         if related_count:
             reply += f" — {related_count} related note{'s' if related_count > 1 else ''} linked"
-        if note_body:
-            # Telegram message limit is 4096 chars; leave room for header
-            max_body = 4096 - len(reply) - 10
-            if len(note_body) > max_body:
-                note_body = note_body[:max_body] + "…"
-            reply += f"\n\n{note_body}"
+
+        if pages_url:
+            reply += f"\n\n{pages_url}"
+            # Add a short preview (first few lines of body, stripped of markup)
+            if note_path_for_reply.exists():
+                note_body = note_path_for_reply.read_text()
+                if note_body.startswith("---"):
+                    end = note_body.find("---", 3)
+                    if end != -1:
+                        note_body = note_body[end + 3:].strip()
+                # Grab the first few non-empty, non-heading lines as preview
+                preview_lines = []
+                for line in note_body.split("\n"):
+                    line = line.strip()
+                    if not line or line.startswith("#") or line.startswith(">") or line.startswith("---"):
+                        continue
+                    preview_lines.append(line)
+                    if len(preview_lines) >= 3:
+                        break
+                if preview_lines:
+                    preview = "\n".join(preview_lines)
+                    max_preview = 4096 - len(reply) - 10
+                    if len(preview) > max_preview:
+                        preview = preview[:max_preview] + "…"
+                    reply += f"\n\n{preview}"
+        else:
+            # Fall back to inline note body (original behaviour)
+            note_body = ""
+            if note_path_for_reply.exists():
+                note_body = note_path_for_reply.read_text()
+                if note_body.startswith("---"):
+                    end = note_body.find("---", 3)
+                    if end != -1:
+                        note_body = note_body[end + 3:].strip()
+            if note_body:
+                max_body = 4096 - len(reply) - 10
+                if len(note_body) > max_body:
+                    note_body = note_body[:max_body] + "…"
+                reply += f"\n\n{note_body}"
 
         send_message(chat_id, reply)
         logger.info("Session %s → %s", session_id, filename)
