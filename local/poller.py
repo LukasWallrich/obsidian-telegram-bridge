@@ -44,6 +44,7 @@ BASE_DIR = Path(__file__).parent.parent
 STATE_FILE = BASE_DIR / "local" / "state.json"
 LOCK_FILE = BASE_DIR / "local" / "poller.lock"
 PROMPT_TEMPLATE = BASE_DIR / "prompts" / "note_prompt.md"
+ASK_PROMPT_TEMPLATE = BASE_DIR / "prompts" / "ask_prompt.md"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 SESSION_GAP = 300  # seconds — gap between messages that starts a new session
@@ -308,6 +309,12 @@ def handle_commands(
                 except Exception as exc:
                     logger.exception("Search failed for query: %s", query)
                     send_message(chat_id, f"Search error: {exc}")
+        elif text.startswith("/ask"):
+            query = text[len("/ask"):].strip()
+            if not query:
+                send_message(chat_id, "Usage: /ask <question>\nExample: /ask What do I know about spaced repetition?")
+            else:
+                handle_ask_command(query, chat_id, upd["update_id"])
         elif text.startswith("/help"):
             send_message(
                 chat_id,
@@ -315,6 +322,7 @@ def handle_commands(
                 "/save — process current session immediately\n"
                 "/clear — discard current session\n"
                 "/find <query> — search vault notes by semantic similarity\n"
+                "/ask <question> — ask a question across your vault notes\n"
                 "/help — show this message\n\n"
                 "Send a URL, voice note, image, or PDF to save a resource to your Obsidian vault.\n"
                 "Start a message with 'todo: ' to add a task directly to your todo inbox.\n"
@@ -333,6 +341,118 @@ def handle_commands(
             remaining.append(upd)
 
     return remaining
+
+
+# ---------------------------------------------------------------------------
+# /ask — RAG question-answering
+# ---------------------------------------------------------------------------
+
+
+def _strip_note_metadata(content: str) -> str:
+    """Strip frontmatter, attachment embeds, and footer from a vault note."""
+    # Strip YAML frontmatter
+    if content.startswith("---"):
+        end = content.find("---", 3)
+        if end != -1:
+            content = content[end + 3:].strip()
+    # Strip attachment embeds at the bottom
+    lines = content.split("\n")
+    while lines and (
+        re.match(r"^!\[\[Attachments/", lines[-1])
+        or lines[-1].strip() == ""
+    ):
+        lines.pop()
+    # Strip "Saved via Telegram" footer
+    while lines and (
+        lines[-1].strip().startswith("*Saved via Telegram")
+        or lines[-1].strip() == "---"
+        or lines[-1].strip() == ""
+    ):
+        lines.pop()
+    return "\n".join(lines)
+
+
+def handle_ask_command(query: str, chat_id: int, update_id: int) -> None:
+    """RAG search: find related notes, read them, ask Claude, send answer."""
+    vault_path = str(settings.obsidian_vault_path)
+
+    send_message(chat_id, "Working on it...")
+
+    # Semantic search
+    try:
+        results = search_vault(query, vault_path, top_k=5)
+    except Exception as exc:
+        logger.exception("Search failed for /ask query: %s", query)
+        send_message(chat_id, f"Search error: {exc}")
+        return
+
+    if not results:
+        send_message(chat_id, f'No notes found matching "{query}". Is Smart Connections configured?')
+        return
+
+    # Read matched notes with token budget
+    MAX_CONTEXT_CHARS = 80_000
+    notes_parts: list[str] = []
+    total_chars = 0
+    notes_used = 0
+
+    for r in results:
+        note_path = Path(vault_path) / r["path"]
+        if not note_path.exists():
+            logger.warning("Note file not found: %s", note_path)
+            continue
+        try:
+            content = note_path.read_text(errors="ignore")
+        except OSError:
+            logger.warning("Could not read note: %s", note_path)
+            continue
+
+        cleaned = _strip_note_metadata(content)
+        if total_chars + len(cleaned) > MAX_CONTEXT_CHARS and notes_used > 0:
+            break
+
+        notes_parts.append(
+            f"### [[{r['title']}]] (similarity: {r['score']:.2f})\n\n{cleaned}"
+        )
+        total_chars += len(cleaned)
+        notes_used += 1
+
+    if not notes_parts:
+        send_message(chat_id, "Found matching notes but could not read any of them from disk.")
+        return
+
+    notes_block = "\n\n---\n\n".join(notes_parts)
+
+    # Build prompt
+    template = ASK_PROMPT_TEMPLATE.read_text()
+    prompt = (
+        template
+        .replace("{question}", query)
+        .replace("{notes_block}", notes_block)
+        .replace("{note_count}", str(notes_used))
+    )
+
+    # Invoke Claude
+    try:
+        answer = invoke_claude(prompt, update_id, vault_path)
+    except Exception as exc:
+        logger.exception("Claude failed for /ask query: %s", query)
+        send_message(chat_id, f"Failed to generate answer: {exc}")
+        return
+
+    answer = answer.strip()
+    if not answer:
+        send_message(chat_id, "Claude returned an empty response. Try rephrasing your question.")
+        return
+
+    # Build reply with sources header
+    sources = ", ".join(f"[[{r['title']}]]" for r in results[:notes_used])
+    header = f"Sources: {sources}\n\n"
+    full_reply = header + answer
+    if len(full_reply) > 4096:
+        full_reply = full_reply[:4093] + "..."
+
+    send_message(chat_id, full_reply)
 
 
 # ---------------------------------------------------------------------------

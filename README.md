@@ -29,7 +29,7 @@ Telegram Bot API  ← stores updates for up to 24h while Mac is offline
      ↓ (polls every 2 min via launchd when Mac is online)
 local/poller.py
   1. getUpdates(offset=last_confirmed+1)
-  2. Handle /save, /clear, /help commands
+  2. Handle /save, /clear, /find, /ask, /help commands
   3. Group messages into sessions (>5 min gap = new session)
   4. Skip sessions where last message <90s ago (still composing)
   5. For ready sessions:
@@ -60,7 +60,8 @@ claude_knowledge/
 │   ├── config.py           # Pydantic settings from .env
 │   └── state.json          # Persisted offset — auto-created, gitignored
 ├── prompts/
-│   └── note_prompt.md      # Claude CLI prompt template
+│   ├── note_prompt.md      # Claude CLI prompt template for note creation
+│   └── ask_prompt.md       # Claude CLI prompt template for /ask RAG queries
 ├── templates/
 │   └── note.html           # Jinja2 template for rendered HTML notes
 ├── scripts/
@@ -208,6 +209,7 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 | `/save` | Process current session immediately |
 | `/clear` | Discard current session |
 | `/find <query>` | Search vault notes by semantic similarity |
+| `/ask <question>` | Ask a question across your vault notes (RAG) |
 | `/help` | Show command list |
 
 ## Todo Inbox
@@ -250,7 +252,7 @@ Voice notes work identically — just say one of the openers at the start. If a 
 - [x] **`/find <query>`** — semantic search over vault using Smart Connections embeddings
 - [x] **Semantic related notes** — note creation uses embedding similarity to find related notes
 - [x] **GitHub Pages** — rendered HTML notes with UUID slugs, wikilinks, and dark/light mode
-- [ ] **YouTube support** — `yt-dlp` transcript extraction for YouTube URLs
+- [x] **YouTube support** — transcript extraction for YouTube URLs
 - [ ] **Webhook fallback** — small Cloudflare Worker to extend beyond the 24h offline limit
 
 ---
