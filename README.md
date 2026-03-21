@@ -51,14 +51,20 @@ local/poller.py
 ## File Structure
 
 ```
-claude_claw/
+claude_knowledge/
 ├── local/
 │   ├── poller.py           # Main loop: poll, group sessions, invoke Claude
 │   ├── media.py            # Voice (Whisper), URL (Jina), PDF, image handlers
+│   ├── pages.py            # Render notes to HTML, publish to GitHub Pages
+│   ├── search.py           # Semantic search using Smart Connections embeddings
 │   ├── config.py           # Pydantic settings from .env
 │   └── state.json          # Persisted offset — auto-created, gitignored
 ├── prompts/
 │   └── note_prompt.md      # Claude CLI prompt template
+├── templates/
+│   └── note.html           # Jinja2 template for rendered HTML notes
+├── scripts/
+│   └── backfill_pages.py   # One-off: render all existing notes to Pages
 ├── com.user.obsidian-bridge.plist  # launchd daemon (edit paths, then install)
 ├── install_launchd.sh      # Substitutes paths and loads the plist
 ├── requirements.txt
@@ -108,7 +114,78 @@ python local/poller.py
 
 Send a URL to your bot. After 90 seconds (or after sending `/save`), run again and check your vault.
 
-### 7. Install launchd daemon
+### 7. GitHub Pages (optional — mobile-friendly note reading)
+
+Renders each saved note as a standalone HTML page with UUID-based URLs, deployed via GitHub Actions to a private repo.
+
+1. **Create a private GitHub repo** (e.g. `knowledge-pages`):
+   ```bash
+   gh repo create knowledge-pages --private --clone ~/Sites/knowledge-pages
+   cd ~/Sites/knowledge-pages
+   git checkout -b main 2>/dev/null  # ensure branch is named main
+   touch .nojekyll
+   ```
+
+2. **Add the GitHub Actions workflow** (`.github/workflows/deploy.yml`):
+   ```bash
+   mkdir -p .github/workflows
+   ```
+   Create `.github/workflows/deploy.yml`:
+   ```yaml
+   name: Deploy to GitHub Pages
+   on:
+     push:
+       branches: [main]
+   permissions:
+     contents: read
+     pages: write
+     id-token: write
+   concurrency:
+     group: pages
+     cancel-in-progress: false
+   jobs:
+     deploy:
+       runs-on: ubuntu-latest
+       environment:
+         name: github-pages
+         url: ${{ steps.deployment.outputs.page_url }}
+       steps:
+         - uses: actions/checkout@v4
+         - uses: actions/configure-pages@v5
+         - uses: actions/upload-pages-artifact@v3
+           with:
+             path: .
+         - id: deployment
+           uses: actions/deploy-pages@v4
+   ```
+
+3. **Push and enable Pages**:
+   ```bash
+   git add -A && git commit -m "Initial setup" && git push -u origin main
+   ```
+   Then enable Pages via the API (or in repo Settings > Pages > Source: GitHub Actions):
+   ```bash
+   gh api repos/<USER>/knowledge-pages/pages -X PUT \
+     --input - <<< '{"build_type":"workflow","source":{"branch":"main","path":"/"}}'
+   ```
+
+4. **Configure the bridge** — add to `.env`:
+   ```
+   PAGES_REPO_PATH=/Users/you/Sites/knowledge-pages
+   PAGES_BASE_URL=https://<user>.github.io/knowledge-pages
+   ```
+
+5. **Backfill existing notes** (optional):
+   ```bash
+   source .venv/bin/activate
+   python scripts/backfill_pages.py
+   ```
+
+Once configured, each new note saved via Telegram is automatically rendered to HTML, committed, and pushed. The Telegram reply includes the page URL plus a short preview.
+
+**Security:** The repo is private (source not visible). Pages are publicly accessible but URLs are 12-character random hex slugs with no index or listing page, plus `<meta name="robots" content="noindex, nofollow">` on every page.
+
+### 8. Install launchd daemon
 
 ```bash
 bash install_launchd.sh
@@ -172,6 +249,7 @@ Voice notes work identically — just say one of the openers at the start. If a 
 ### Phase 2 features
 - [x] **`/find <query>`** — semantic search over vault using Smart Connections embeddings
 - [x] **Semantic related notes** — note creation uses embedding similarity to find related notes
+- [x] **GitHub Pages** — rendered HTML notes with UUID slugs, wikilinks, and dark/light mode
 - [ ] **YouTube support** — `yt-dlp` transcript extraction for YouTube URLs
 - [ ] **Webhook fallback** — small Cloudflare Worker to extend beyond the 24h offline limit
 
