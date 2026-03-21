@@ -70,6 +70,36 @@ def transcribe_voice(file_id: str) -> str:
         tmp_path.unlink(missing_ok=True)
 
 
+def _looks_like_blocked_content(text: str) -> bool:
+    """Detect common signs that a page blocked scraping / returned no real content."""
+    lower = text.lower()
+    # Common anti-scraping / paywall / cookie-wall indicators
+    blocked_phrases = [
+        "enable javascript",
+        "javascript is required",
+        "access denied",
+        "403 forbidden",
+        "just a moment",  # Cloudflare
+        "checking your browser",
+        "please verify you are a human",
+        "captcha",
+        "we use cookies",  # cookie-only pages
+        "subscribe to continue reading",
+        "this content is available to subscribers",
+        "sign in to view",
+        "log in to continue",
+    ]
+    for phrase in blocked_phrases:
+        if phrase in lower:
+            return True
+    # Very short content relative to boilerplate (title + nav but no body)
+    # If there's very little actual paragraph text, it's likely blocked
+    lines = [l.strip() for l in text.splitlines() if len(l.strip()) > 40]
+    if len(lines) < 3:
+        return True
+    return False
+
+
 def fetch_url(url: str) -> tuple[str | None, bool]:
     """
     Fetch URL content via Jina Reader.
@@ -89,6 +119,9 @@ def fetch_url(url: str) -> tuple[str | None, bool]:
         text = r.text.strip()
         if len(text) < JINA_MIN_LENGTH:
             logger.warning("Jina returned <200 chars for %s — marking fetch_failed", url)
+            return None, True
+        if _looks_like_blocked_content(text):
+            logger.warning("Jina returned blocked/paywall content for %s — marking fetch_failed", url)
             return None, True
         return text, False
     except Exception as exc:

@@ -353,6 +353,7 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
     image_paths: list[str] = []
     pdf_texts: list[str] = []
     fetch_failed = False
+    failed_urls: list[str] = []
     content_parts: list[str] = []
     unsupported_docs: list[str] = []
     pending_attachments: list[tuple[str, bytes]] = []  # (extension, raw_bytes) — saved after title is known
@@ -438,6 +439,7 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
             fetched, failed = fetch_url(url)
         if failed:
             fetch_failed = True
+            failed_urls.append(url)
             source_url_or_type = url
         else:
             content_parts.append(fetched)
@@ -459,12 +461,18 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
         source_id = sha256_of("".join(plain_texts)[:500])
 
     # Build content block
-    if fetch_failed and not content_parts:
-        content_block = (
+    failed_block = ""
+    if failed_urls:
+        failed_lines = "\n".join(f"  - {u}" for u in failed_urls)
+        failed_block = (
             f"[URL FETCH FAILED]\n"
-            f"The URL fetch failed for: {source_url_or_type}\n"
-            f"Retrieve this URL yourself using your web tools or /browser-use skill."
+            f"The following URLs could NOT be retrieved:\n{failed_lines}"
         )
+
+    if content_parts and failed_block:
+        content_block = failed_block + "\n\n---\n\n" + "\n\n---\n\n".join(content_parts)
+    elif failed_block:
+        content_block = failed_block
     elif content_parts:
         content_block = "\n\n---\n\n".join(content_parts)
     else:

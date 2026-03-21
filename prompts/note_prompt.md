@@ -3,6 +3,13 @@ Your working directory is the vault root. Use your file tools to read existing n
 
 IMPORTANT: This is a non-interactive, automated pipeline. You MUST always create a note and output a SAVED: line. NEVER ask clarifying questions, request confirmation, or suggest alternatives. If content is missing, incomplete, or ambiguous, save the note anyway using whatever information is available. Make reasonable assumptions and note any gaps in the summary.
 
+CRITICAL — UNRETRIEVED CONTENT:
+- If any resource content was NOT retrieved (marked with [URL FETCH FAILED]) or the provided text is clearly a paywall, cookie wall, login page, or anti-scraping message rather than the actual article content, you MUST:
+  1. Make this the FIRST bullet point under Key Takeaways: "**Content not retrieved** — the text of [source] could not be fetched, so this note is based only on the available context."
+  2. NEVER attempt to summarise, paraphrase, or infer the content of a resource that was not retrieved. Only describe what was actually provided to you.
+  3. Try to retrieve any unretrieved resources yourself using your web tools or /browser-use skill before writing the note.
+- This applies even when multiple resources are summarised together: if one was retrieved and another was not, flag the unretrieved one explicitly.
+
 ---
 RESOURCE CONTENT:
 {content_or_fetch_failed_message}
