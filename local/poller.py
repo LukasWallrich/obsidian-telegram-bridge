@@ -29,6 +29,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 from config import settings
 from media import extract_pdf, extract_text_document, fetch_url, fetch_youtube_transcript, is_youtube_url, save_image, sha256_of, transcribe_voice
 from pages import git_commit_and_push, publish_note
+from reflections import (
+    check_and_send_reflections,
+    handle_reflect_command,
+    match_pending_reflection,
+    process_reflection_response,
+)
 from search import collect_vault_tags, search_vault
 
 logging.basicConfig(
@@ -111,8 +117,11 @@ def tg_post(method: str, **params) -> dict:
     return data["result"]
 
 
-def send_message(chat_id: int, text: str) -> None:
-    tg_post("sendMessage", chat_id=chat_id, text=text)
+def send_message(chat_id: int, text: str, reply_to_message_id: int | None = None) -> dict:
+    params = {"chat_id": chat_id, "text": text}
+    if reply_to_message_id:
+        params["reply_to_message_id"] = reply_to_message_id
+    return tg_post("sendMessage", **params)
 
 
 def get_updates(offset: int) -> list[dict]:
@@ -264,6 +273,7 @@ def handle_commands(
     force_ready_chat_ids: set[int],
     cleared_chat_ids: set[int],
     save_update_ids: set[int],
+    state: dict | None = None,
 ) -> list[dict]:
     """
     Process bot commands. Returns remaining (non-command) updates.
@@ -271,6 +281,8 @@ def handle_commands(
     save_update_ids collects update_ids of /save commands so they can be used
     as session split points.
     """
+    if state is None:
+        state = {}
     remaining = []
     for upd in updates:
         msg = upd.get("message") or upd.get("edited_message")
@@ -284,6 +296,33 @@ def handle_commands(
 
         if sender_id != settings.telegram_allowed_user_id:
             continue  # silently drop
+
+        # Check for reflection reply (reply-to a pending reflection prompt)
+        reply_to = msg.get("reply_to_message", {})
+        reply_msg_id = reply_to.get("message_id")
+        if reply_msg_id:
+            pending = match_pending_reflection(state, reply_msg_id)
+            if pending:
+                # Transcribe voice if needed, then process as reflection
+                user_text = text
+                if msg.get("voice"):
+                    try:
+                        user_text = transcribe_voice(msg["voice"]["file_id"])
+                    except Exception as exc:
+                        logger.exception("Voice transcription failed for reflection reply")
+                        send_message(chat_id, f"Could not transcribe voice: {exc}")
+                        continue
+                if user_text:
+                    try:
+                        process_reflection_response(
+                            pending, user_text, chat_id,
+                            str(settings.obsidian_vault_path),
+                            invoke_claude, send_message, state,
+                        )
+                    except Exception:
+                        logger.exception("Reflection response processing failed")
+                        send_message(chat_id, "Failed to process reflection response.")
+                continue
 
         if text.startswith("/save"):
             force_ready_chat_ids.add(chat_id)
@@ -315,6 +354,10 @@ def handle_commands(
                 send_message(chat_id, "Usage: /ask <question>\nExample: /ask What do I know about spaced repetition?")
             else:
                 handle_ask_command(query, chat_id, upd["update_id"])
+        elif text.startswith("/reflect"):
+            state.update(
+                handle_reflect_command(text, chat_id, state, send_message, invoke_claude)
+            )
         elif text.startswith("/help"):
             send_message(
                 chat_id,
@@ -323,6 +366,7 @@ def handle_commands(
                 "/clear — discard current session\n"
                 "/find <query> — search vault notes by semantic similarity\n"
                 "/ask <question> — ask a question across your vault notes\n"
+                "/reflect — manage reflection chains (list, trigger, pause, ...)\n"
                 "/help — show this message\n\n"
                 "Send a URL, voice note, image, or PDF to save a resource to your Obsidian vault.\n"
                 "Start a message with 'todo: ' to add a task directly to your todo inbox.\n"
@@ -660,7 +704,7 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
 # ---------------------------------------------------------------------------
 
 
-def invoke_claude(prompt: str, session_id: int, vault_path: str) -> str:
+def invoke_claude(prompt: str, session_id: int, vault_path: str, model: str = "claude-sonnet-4-6") -> str:
     """Write prompt to /tmp file, pipe to claude CLI, return stdout."""
     tmp_path = Path(f"/tmp/bridge_prompt_{session_id}.md")
     try:
@@ -669,7 +713,7 @@ def invoke_claude(prompt: str, session_id: int, vault_path: str) -> str:
         env.pop("CLAUDECODE", None)  # allow nested invocation from within a Claude Code session
         with open(tmp_path) as f:
             result = subprocess.run(
-                ["claude", "--print", "--dangerously-skip-permissions", "--model", "claude-sonnet-4-6"],
+                ["claude", "--print", "--dangerously-skip-permissions", "--model", model],
                 stdin=f,
                 capture_output=True,
                 text=True,
@@ -877,6 +921,14 @@ def run_poll() -> None:
         logger.info("In backoff period (%d seconds remaining). Skipping poll.", remaining)
         return
 
+    # Check and send due reflection prompts
+    try:
+        chat_id_for_reflections = settings.telegram_allowed_user_id
+        state = check_and_send_reflections(state, chat_id_for_reflections, send_message)
+        save_state(state)
+    except Exception:
+        logger.exception("Reflection check failed — continuing with normal poll")
+
     logger.info("Polling with offset=%s", last_offset + 1)
     updates = get_updates(last_offset + 1)
 
@@ -889,7 +941,7 @@ def run_poll() -> None:
     save_update_ids: set[int] = set()
 
     # Handle commands first; get back non-command updates
-    remaining = handle_commands(updates, force_ready_chat_ids, cleared_chat_ids, save_update_ids)
+    remaining = handle_commands(updates, force_ready_chat_ids, cleared_chat_ids, save_update_ids, state=state)
 
     # Advance offset past all command updates (they're fully handled)
     command_update_ids = {
@@ -928,7 +980,9 @@ def run_poll() -> None:
         process_session(session)
         last_offset = max(last_offset, session_max_update_id(session))
 
-    save_state({"last_offset": last_offset, "backoff_until": 0})
+    state["last_offset"] = last_offset
+    state["backoff_until"] = 0
+    save_state(state)
     logger.info("State saved with last_offset=%s", last_offset)
 
 

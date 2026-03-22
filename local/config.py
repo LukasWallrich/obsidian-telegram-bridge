@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     obsidian_resource_folder: str = "Resources/Saved"
     obsidian_todo_inbox: str = "todo-inbox.md"
     session_timeout_seconds: int = 90
+    obsidian_reflections_folder: str = "Reflections"
 
     pages_repo_path: Path | None = None
     pages_base_url: str = ""

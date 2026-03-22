@@ -1,0 +1,37 @@
+{
+  "chains": [
+    {
+      "id": "weekly-wins",
+      "name": "Weekly Wins",
+      "schedule_day": "friday",
+      "schedule_time": "18:00",
+      "prompt_template": "weekly_wins_prompt.md",
+      "telegram_prompt": "It's Friday! What have been your greatest wins this week?\n\n{context_preview}\n\n(Reply to this message with text or a voice note)",
+      "folder": "weekly-wins",
+      "context_strategy": "last_week_ahead",
+      "active": true
+    },
+    {
+      "id": "recording-takeaways",
+      "name": "Recording Takeaways",
+      "schedule_day": "saturday",
+      "schedule_time": "09:00",
+      "prompt_template": "recording_takeaways_prompt.md",
+      "telegram_prompt": "Here are the resources you saved since last Saturday:\n\n{context_preview}\n\nWhat key takeaways or reflections do these trigger?\n\n(Reply to this message with text or a voice note)",
+      "folder": "recording-takeaways",
+      "context_strategy": "since_last_run",
+      "active": true
+    },
+    {
+      "id": "week-ahead",
+      "name": "Week Ahead Planning",
+      "schedule_day": "sunday",
+      "schedule_time": "18:00",
+      "prompt_template": "week_ahead_prompt.md",
+      "telegram_prompt": "Sunday planning time! What will make next week successful? Think about your key priorities \u2014 both in terms of goals and the kind of experience you want to have.\n\n(Reply to this message with text or a voice note)",
+      "folder": "week-ahead",
+      "context_strategy": "none",
+      "active": true
+    }
+  ]
+}
