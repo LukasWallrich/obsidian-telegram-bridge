@@ -29,7 +29,7 @@ Telegram Bot API  ← stores updates for up to 24h while Mac is offline
      ↓ (polls every 2 min via launchd when Mac is online)
 local/poller.py
   1. getUpdates(offset=last_confirmed+1)
-  2. Handle /save, /clear, /find, /ask, /help commands
+  2. Handle /save, /clear, /find, /ask, /revisit, /reflect, /help commands
   3. Group messages into sessions (>5 min gap = new session)
   4. Skip sessions where last message <90s ago (still composing)
   5. For ready sessions:
@@ -56,12 +56,17 @@ claude_knowledge/
 │   ├── poller.py           # Main loop: poll, group sessions, invoke Claude
 │   ├── media.py            # Voice (Whisper), URL (Jina), PDF, image handlers
 │   ├── pages.py            # Render notes to HTML, publish to GitHub Pages
+│   ├── reflections.py      # Scheduled reflection chains (config, send, process)
+│   ├── revisit.py          # Spaced-repetition note revisiting (/revisit command)
 │   ├── search.py           # Semantic search using Smart Connections embeddings
 │   ├── config.py           # Pydantic settings from .env
 │   └── state.json          # Persisted offset — auto-created, gitignored
+├── reflections/
+│   └── config.json         # Reflection chain definitions (schedules, prompts)
 ├── prompts/
 │   ├── note_prompt.md      # Claude CLI prompt template for note creation
-│   └── ask_prompt.md       # Claude CLI prompt template for /ask RAG queries
+│   ├── ask_prompt.md       # Claude CLI prompt template for /ask RAG queries
+│   └── reflections/        # Prompt templates for reflection chains
 ├── templates/
 │   └── note.html           # Jinja2 template for rendered HTML notes
 ├── scripts/
@@ -210,6 +215,8 @@ rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 | `/clear` | Discard current session |
 | `/find <query>` | Search vault notes by semantic similarity |
 | `/ask <question>` | Ask a question across your vault notes (RAG) |
+| `/revisit [topic]` | Revisit a saved note with guided reflection (spaced repetition) |
+| `/reflect` | Manage reflection chains (`list`, `trigger`, `pause`, `resume`, `schedule`, `add`, `remove`) |
 | `/help` | Show command list |
 
 ## Todo Inbox
@@ -225,6 +232,32 @@ Send a text message or voice note starting with any of these openers to append a
 | `reminder:` | `reminder: call back at 3pm` |
 
 Voice notes work identically — just say one of the openers at the start. If a session contains a voice todo alongside other content (e.g. a URL), the todo is added to the inbox and the URL is saved as a note separately.
+
+## Reflection Chains
+
+Scheduled prompts sent via Telegram that encourage regular reflection. Reply with text or a voice note — the response is lightly edited by Claude Haiku (preserving your voice) and saved as a note in `Reflections/`.
+
+**Built-in chains:**
+
+| Chain | Schedule | Purpose |
+|-------|----------|---------|
+| Weekly Wins | Friday 18:00 | Celebrate wins, referencing week-ahead goals |
+| Recording Takeaways | Saturday 09:00 | Reflect on resources saved since last Saturday |
+| Week Ahead Planning | Sunday 18:00 | Set priorities for the coming week |
+| Note Revisit | Tuesday 10:00 | Revisit a saved note (spaced repetition) |
+| Note Revisit | Thursday 10:00 | Revisit a saved note (spaced repetition) |
+
+Manage chains via `/reflect list`, `/reflect pause <id>`, `/reflect trigger <id>`, etc.
+
+### `/revisit` — Spaced Note Revisiting
+
+Send `/revisit` (or `/revisit <topic>`) to revisit a previously saved note. The bot:
+1. Selects a note using spaced-repetition priority (intervals: 7d → 21d → 60d → 180d → 365d)
+2. Shows its key takeaways and semantically related notes from the vault
+3. Generates a 4-5 sentence synthesis of how the notes connect (via Claude Haiku)
+4. Asks for your current thoughts
+
+Your reply is saved as a reflection note in `Reflections/revisits/`. The note is then deprioritised for future revisits based on the spaced-repetition schedule. This also runs automatically on Tuesday and Thursday mornings.
 
 ## What to Send
 
@@ -253,6 +286,9 @@ Voice notes work identically — just say one of the openers at the start. If a 
 - [x] **Semantic related notes** — note creation uses embedding similarity to find related notes
 - [x] **GitHub Pages** — rendered HTML notes with UUID slugs, wikilinks, and dark/light mode
 - [x] **YouTube support** — transcript extraction for YouTube URLs
+- [x] **`/ask <question>`** — RAG question-answering over vault notes
+- [x] **Reflection chains** — scheduled weekly reflections (wins, takeaways, planning)
+- [x] **`/revisit`** — spaced-repetition revisiting of saved notes with guided reflection
 - [ ] **Webhook fallback** — small Cloudflare Worker to extend beyond the 24h offline limit
 
 ---

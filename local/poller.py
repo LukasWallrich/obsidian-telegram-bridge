@@ -35,6 +35,7 @@ from reflections import (
     match_pending_reflection,
     process_reflection_response,
 )
+from revisit import handle_revisit_command, record_revisit
 from search import collect_vault_tags, search_vault
 
 logging.basicConfig(
@@ -319,6 +320,10 @@ def handle_commands(
                             str(settings.obsidian_vault_path),
                             invoke_claude, send_message, state,
                         )
+                        # Record revisit if this was a revisit reflection
+                        revisit_filename = pending.get("revisit_note_filename")
+                        if revisit_filename:
+                            record_revisit(state, revisit_filename)
                     except Exception:
                         logger.exception("Reflection response processing failed")
                         send_message(chat_id, "Failed to process reflection response.")
@@ -354,6 +359,10 @@ def handle_commands(
                 send_message(chat_id, "Usage: /ask <question>\nExample: /ask What do I know about spaced repetition?")
             else:
                 handle_ask_command(query, chat_id, upd["update_id"])
+        elif text.startswith("/revisit"):
+            state.update(
+                handle_revisit_command(text, chat_id, state, send_message, invoke_claude)
+            )
         elif text.startswith("/reflect"):
             state.update(
                 handle_reflect_command(text, chat_id, state, send_message, invoke_claude)
@@ -366,6 +375,7 @@ def handle_commands(
                 "/clear — discard current session\n"
                 "/find <query> — search vault notes by semantic similarity\n"
                 "/ask <question> — ask a question across your vault notes\n"
+                "/revisit [topic] — revisit a saved note with guided reflection\n"
                 "/reflect — manage reflection chains (list, trigger, pause, ...)\n"
                 "/help — show this message\n\n"
                 "Send a URL, voice note, image, or PDF to save a resource to your Obsidian vault.\n"
@@ -924,7 +934,7 @@ def run_poll() -> None:
     # Check and send due reflection prompts
     try:
         chat_id_for_reflections = settings.telegram_allowed_user_id
-        state = check_and_send_reflections(state, chat_id_for_reflections, send_message)
+        state = check_and_send_reflections(state, chat_id_for_reflections, send_message, invoke_claude)
         save_state(state)
     except Exception:
         logger.exception("Reflection check failed — continuing with normal poll")

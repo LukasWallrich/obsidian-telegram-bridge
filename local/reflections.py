@@ -149,7 +149,8 @@ def gather_since_last_run(
 
 
 def gather_context(
-    strategy: str, chain_id: str, vault_path: str, state: dict
+    strategy: str, chain_id: str, vault_path: str, state: dict,
+    invoke_claude_fn=None,
 ) -> str:
     """Dispatch to the appropriate context gathering function."""
     if strategy == "last_week_ahead":
@@ -158,6 +159,9 @@ def gather_context(
         return gather_since_last_run(
             chain_id, vault_path, settings.obsidian_resource_folder, state
         )
+    elif strategy == "revisit_note":
+        from revisit import gather_revisit_context_for_chain
+        return gather_revisit_context_for_chain(vault_path, state, invoke_claude_fn)
     return ""
 
 
@@ -250,6 +254,7 @@ def send_reflection_prompt(
     vault_path: str,
     state: dict,
     send_message_fn,
+    invoke_claude_fn=None,
 ) -> None:
     """Gather context, send Telegram prompt, save pending state."""
     context = gather_context(
@@ -257,6 +262,7 @@ def send_reflection_prompt(
         chain["id"],
         vault_path,
         state,
+        invoke_claude_fn=invoke_claude_fn,
     )
 
     # Build telegram message
@@ -288,11 +294,28 @@ def send_reflection_prompt(
         logger.error("Could not capture message_id for reflection prompt")
         return
 
-    save_pending(state, chain["id"], msg_id, context)
+    # For revisit chains, use the clean context (takeaways + synthesis) instead of
+    # the full Telegram message as the {context} for the reflection prompt template.
+    pending_context = context
+    if chain.get("context_strategy") == "revisit_note":
+        pending_context = state.pop("pending_revisit_context", context)
+
+    save_pending(state, chain["id"], msg_id, pending_context)
+
+    # For revisit chains, store the selected note filename and title for history tracking
+    if chain.get("context_strategy") == "revisit_note":
+        pending_revisit_note = state.pop("pending_revisit_note", None)
+        pending_revisit_title = state.pop("pending_revisit_title", None)
+        if pending_revisit_note and chain["id"] in state.get("pending_reflections", {}):
+            state["pending_reflections"][chain["id"]]["revisit_note_filename"] = pending_revisit_note
+            state["pending_reflections"][chain["id"]]["revisit_note_title"] = pending_revisit_title or ""
+
     logger.info("Sent reflection prompt for chain '%s' (msg_id=%s)", chain["id"], msg_id)
 
 
-def check_and_send_reflections(state: dict, chat_id: int, send_message_fn) -> dict:
+def check_and_send_reflections(
+    state: dict, chat_id: int, send_message_fn, invoke_claude_fn=None,
+) -> dict:
     """Check for due reflections and send them. Returns updated state."""
     expire_pending_reflections(state)
 
@@ -304,7 +327,10 @@ def check_and_send_reflections(state: dict, chat_id: int, send_message_fn) -> di
 
     for chain in due:
         try:
-            send_reflection_prompt(chain, chat_id, vault_path, state, send_message_fn)
+            send_reflection_prompt(
+                chain, chat_id, vault_path, state, send_message_fn,
+                invoke_claude_fn=invoke_claude_fn,
+            )
             # Mark as sent today
             if "reflections_sent" not in state:
                 state["reflections_sent"] = {}
@@ -358,6 +384,17 @@ def process_reflection_response(
         .replace("{chain_id}", chain_id)
         .replace("{telegram_prompt}", chain.get("telegram_prompt", "").replace("{context_preview}", "").strip())
     )
+
+    # Extra placeholders for revisit reflections
+    revisit_title = pending.get("revisit_note_title", "")
+    if revisit_title:
+        # short_title strips the leading date prefix (e.g., "2026-01-15 ")
+        short_title = re.sub(r"^\d{4}-\d{2}-\d{2}\s*", "", revisit_title)
+        prompt = (
+            prompt
+            .replace("{revisit_note_title}", revisit_title)
+            .replace("{short_title}", short_title)
+        )
 
     # Ensure the target directory exists
     target_dir = Path(vault_path) / settings.obsidian_reflections_folder / chain.get("folder", chain_id)

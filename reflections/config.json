@@ -32,6 +32,28 @@
       "folder": "week-ahead",
       "context_strategy": "none",
       "active": true
+    },
+    {
+      "id": "note-revisit-tue",
+      "name": "Note Revisit",
+      "schedule_day": "tuesday",
+      "schedule_time": "10:00",
+      "prompt_template": "revisit_prompt.md",
+      "telegram_prompt": "{context_preview}",
+      "folder": "revisits",
+      "context_strategy": "revisit_note",
+      "active": true
+    },
+    {
+      "id": "note-revisit-thu",
+      "name": "Note Revisit",
+      "schedule_day": "thursday",
+      "schedule_time": "10:00",
+      "prompt_template": "revisit_prompt.md",
+      "telegram_prompt": "{context_preview}",
+      "folder": "revisits",
+      "context_strategy": "revisit_note",
+      "active": true
     }
   ]
 }
