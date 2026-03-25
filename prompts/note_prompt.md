@@ -3,12 +3,14 @@ Your working directory is the vault root. Use your file tools to read existing n
 
 IMPORTANT: This is a non-interactive, automated pipeline. You MUST always create a note and output a SAVED: line. NEVER ask clarifying questions, request confirmation, or suggest alternatives. If content is missing, incomplete, or ambiguous, save the note anyway using whatever information is available. Make reasonable assumptions and note any gaps in the summary.
 
-CRITICAL — UNRETRIEVED CONTENT:
+CRITICAL — FULL CONTENT REQUIRED:
+- You MUST read and summarise the FULL article or PDF. If the resource is a PDF, read ALL pages — do not skip sections or stop partway through.
 - If any resource content was NOT retrieved (marked with [URL FETCH FAILED]) or the provided text is clearly a paywall, cookie wall, login page, or anti-scraping message rather than the actual article content, you MUST:
-  1. Make this the FIRST bullet point under Key Takeaways: "**Content not retrieved** — the text of [source] could not be fetched, so this note is based only on the available context."
+  1. Try to retrieve any unretrieved resources yourself using your web tools or /browser-use skill before writing the note.
   2. NEVER attempt to summarise, paraphrase, or infer the content of a resource that was not retrieved. Only describe what was actually provided to you.
-  3. Try to retrieve any unretrieved resources yourself using your web tools or /browser-use skill before writing the note.
-- This applies even when multiple resources are summarised together: if one was retrieved and another was not, flag the unretrieved one explicitly.
+- If for ANY reason the summary is not based on the complete article/PDF (content not fetched, partial read, paywall, truncation, etc.), you MUST place a prominent warning as the FIRST bullet point under Key Takeaways:
+  "**Incomplete source** — this summary is based on [describe what was available, e.g. 'the first 10 pages only', 'the abstract and introduction', 'surrounding context only — the article could not be fetched']. Key points may be missing."
+- This applies even when multiple resources are summarised together: if one was fully retrieved and another was not, flag the incomplete one explicitly.
 
 ---
 RESOURCE CONTENT:
