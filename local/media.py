@@ -14,6 +14,7 @@ import hashlib
 import logging
 import re
 import tempfile
+import time
 from pathlib import Path
 
 import httpx
@@ -30,6 +31,14 @@ JINA_BASE = "https://r.jina.ai/"
 JINA_MIN_LENGTH = 200  # chars below this = treat as failed
 
 
+_TRANSIENT_HINTS = ("connection reset", "econnreset", "errno 54", "timed out", "timeout")
+
+
+def _is_transient(exc: Exception) -> bool:
+    lower = str(exc).lower()
+    return any(h in lower for h in _TRANSIENT_HINTS)
+
+
 def _telegram_file_url(file_path: str) -> str:
     return f"https://api.telegram.org/file/bot{settings.telegram_bot_token}/{file_path}"
 
@@ -42,17 +51,51 @@ def _get_telegram_file_path(file_id: str) -> str:
     return r.json()["result"]["file_path"]
 
 
-def _download_bytes(file_id: str) -> bytes:
+def _download_bytes(file_id: str, *, attempts: int = 3) -> bytes:
     file_path = _get_telegram_file_path(file_id)
     url = _telegram_file_url(file_path)
-    r = httpx.get(url, timeout=60, follow_redirects=True)
-    r.raise_for_status()
-    return r.content
+    delay = 2.0
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            r = httpx.get(url, timeout=60, follow_redirects=True)
+            r.raise_for_status()
+            return r.content
+        except Exception as exc:
+            if _is_transient(exc) and attempt < attempts - 1:
+                logger.warning("Download attempt %d/%d failed (%s) — retrying in %.0fs", attempt + 1, attempts, exc, delay)
+                time.sleep(delay)
+                delay *= 2
+                last_exc = exc
+                continue
+            raise
+    raise last_exc  # type: ignore[misc]
+
+
+def _describe_network_error(exc: Exception) -> str:
+    """Translate a low-level network exception into a readable description."""
+    msg = str(exc)
+    lower = msg.lower()
+    if "54" in msg or "connection reset" in lower or "econnreset" in lower:
+        return "connection was reset by the remote server — this is usually temporary, please try again"
+    if "timeout" in lower or "timed out" in lower:
+        return "request timed out — please try again"
+    if "refused" in lower or "[errno 111]" in lower:
+        return "connection refused by the server"
+    if "getaddrinfo" in lower or "name or service not known" in lower:
+        return "DNS resolution failed — check your network connection"
+    return msg
 
 
 def transcribe_voice(file_id: str) -> str:
     """Download a Telegram voice note and transcribe it with Whisper."""
-    audio_bytes = _download_bytes(file_id)
+    try:
+        audio_bytes = _download_bytes(file_id)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not download voice note from Telegram: {_describe_network_error(exc)}"
+        ) from exc
+
     client = OpenAI(api_key=settings.openai_api_key)
 
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
@@ -60,12 +103,25 @@ def transcribe_voice(file_id: str) -> str:
         tmp_path = Path(tmp.name)
 
     try:
-        with open(tmp_path, "rb") as audio_file:
-            transcript = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-            )
-        return transcript.text
+        delay = 2.0
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                with open(tmp_path, "rb") as audio_file:
+                    transcript = client.audio.transcriptions.create(
+                        model="whisper-1",
+                        file=audio_file,
+                    )
+                return transcript.text
+            except Exception as exc:
+                if _is_transient(exc) and attempt < 2:
+                    logger.warning("Whisper attempt %d/3 failed (%s) — retrying in %.0fs", attempt + 1, exc, delay)
+                    time.sleep(delay)
+                    delay *= 2
+                    last_exc = exc
+                    continue
+                raise RuntimeError(f"Whisper transcription failed: {_describe_network_error(exc)}") from exc
+        raise RuntimeError(f"Whisper transcription failed after retries: {_describe_network_error(last_exc)}") from last_exc  # type: ignore[arg-type]
     finally:
         tmp_path.unlink(missing_ok=True)
 

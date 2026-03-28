@@ -896,15 +896,24 @@ def process_session(session: list[dict]) -> None:
     except Exception as exc:
         logger.exception("Failed to process session %s", session_id)
         if chat_id:
-            send_message(chat_id, f"Error saving note: {exc}")
-        # Record backoff on quota/rate-limit errors or any Claude failure
+            exc_str = str(exc)
+            # Transcription errors happen before any note is saved — use a more accurate prefix
+            if exc_str.startswith(("Could not download voice note", "Whisper transcription failed")):
+                send_message(chat_id, f"Voice note error: {exc_str}")
+            else:
+                send_message(chat_id, f"Error saving note: {exc_str}")
+        # Only backoff on quota/rate-limit or Claude failures — not transient network errors
         exc_str = str(exc).lower()
         is_quota = any(kw in exc_str for kw in ("quota", "rate", "limit", "429", "overloaded", "capacity"))
-        backoff_seconds = 900 if is_quota else 900  # 15 min either way — be conservative
-        state = load_state()
-        state["backoff_until"] = time.time() + backoff_seconds
-        save_state(state)
-        logger.info("Backoff set for %d seconds (quota-related: %s)", backoff_seconds, is_quota)
+        is_transient_network = any(h in exc_str for h in ("connection reset", "econnreset", "errno 54", "timed out", "timeout", "connection refused"))
+        if is_quota or (not is_transient_network):
+            backoff_seconds = 900
+            state = load_state()
+            state["backoff_until"] = time.time() + backoff_seconds
+            save_state(state)
+            logger.info("Backoff set for %d seconds (quota-related: %s)", backoff_seconds, is_quota)
+        else:
+            logger.info("Transient network error — no backoff, will retry on next poll")
         raise
 
     finally:

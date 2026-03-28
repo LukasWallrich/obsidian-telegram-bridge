@@ -118,6 +118,17 @@ def gather_since_last_run(
     if not resource_dir.exists():
         return ""
 
+    # Load slug map for online links if pages are configured
+    slug_map = None
+    base_url = ""
+    if settings.pages_repo_path and settings.pages_base_url:
+        try:
+            from pages import SlugMap
+            slug_map = SlugMap(Path(settings.pages_repo_path))
+            base_url = settings.pages_base_url.rstrip("/")
+        except Exception:
+            pass
+
     notes = []
     for f in sorted(resource_dir.glob("*.md")):
         match = re.match(r"(\d{4}-\d{2}-\d{2})", f.name)
@@ -138,7 +149,14 @@ def gather_since_last_run(
                         if line and not line.startswith("#") and not line.startswith(">"):
                             preview = line[:120]
                             break
-                    notes.append(f"- [[{title}]]: {preview}" if preview else f"- [[{title}]]")
+                    # Build online link if available
+                    url = ""
+                    if slug_map:
+                        slug = slug_map.resolve(title)
+                        if slug:
+                            url = f"{base_url}/{slug}.html"
+                    link = f" ({url})" if url else ""
+                    notes.append(f"- [[{title}]]{link}: {preview}" if preview else f"- [[{title}]]{link}")
             except ValueError:
                 continue
 
