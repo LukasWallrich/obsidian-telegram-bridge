@@ -236,12 +236,25 @@ def gather_revisit_context(
             note_title, sections["takeaways"], related_notes, invoke_claude_fn, vault_path
         )
 
+    # Resolve online URL if pages are configured
+    online_url = ""
+    if settings.pages_repo_path and settings.pages_base_url:
+        try:
+            from pages import SlugMap
+            slug_map = SlugMap(Path(settings.pages_repo_path))
+            slug = slug_map.resolve(note_title)
+            if slug:
+                online_url = f"{settings.pages_base_url.rstrip('/')}/{slug}.html"
+        except Exception:
+            pass
+
     return {
         "note_title": note_title,
         "why_saved": sections["why_saved"],
         "takeaways": sections["takeaways"],
         "related_notes": related_notes,
         "synthesis": synthesis,
+        "online_url": online_url,
     }
 
 
@@ -290,7 +303,10 @@ def _generate_synthesis(
 
 def format_revisit_telegram_message(context: dict) -> str:
     """Assemble the Telegram message for a revisit prompt."""
-    lines = [f"Time to revisit: [[{context['note_title']}]]"]
+    header = f"Time to revisit: [[{context['note_title']}]]"
+    if context.get("online_url"):
+        header += f"\n{context['online_url']}"
+    lines = [header]
 
     if context["why_saved"]:
         lines.append(f"\nWhy you saved this:\n> {context['why_saved']}")
