@@ -217,12 +217,6 @@ Renders each saved note as a standalone HTML page with UUID-based URLs, deployed
    PAGES_BASE_URL=https://<user>.github.io/knowledge-pages
    ```
 
-5. **Backfill existing notes** (optional):
-   ```bash
-   source .venv/bin/activate
-   python scripts/backfill_pages.py
-   ```
-
 Once configured, each new note is automatically rendered, committed, and pushed. The Telegram reply includes the page URL plus a short preview.
 
 **Security:** The repo is private. Pages are publicly accessible but URLs are 12-character random hex slugs with no index or listing page, plus `<meta name="robots" content="noindex, nofollow">` on every page.
