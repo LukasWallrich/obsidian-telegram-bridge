@@ -18,7 +18,7 @@ local/poller.py
   2. Waits 90s for composing, or /save to process immediately
   3. Downloads media (voice→Whisper, PDF→text, image→/tmp)
   4. Fetches URLs via Jina Reader (YouTube transcripts when available)
-  5. Finds semantically related notes via Smart Connections embeddings
+  5. Finds semantically related notes via the headless vault index (bge-micro-v2)
   6. Pipes prompt to Claude CLI → structured Markdown note
   7. Saves to Obsidian vault with frontmatter, tags, and [[wikilinks]]
   8. Optionally renders to GitHub Pages for mobile reading
@@ -94,8 +94,10 @@ claude_knowledge/
 │   ├── pages.py            # Render notes to HTML, publish to GitHub Pages
 │   ├── reflections.py      # Scheduled reflection chains (config, send, process)
 │   ├── revisit.py          # Spaced-repetition note revisiting (/revisit command)
-│   ├── search.py           # Semantic search using Smart Connections embeddings
+│   ├── search.py           # Semantic search over the headless vault index
+│   ├── reindex.py          # Headless re-embedding → local/vault_index.json
 │   ├── config.py           # Pydantic settings from .env
+│   ├── vault_index.json    # Note embeddings — auto-built by reindex.py, gitignored
 │   └── state.json          # Persisted offset — auto-created, gitignored
 ├── reflections/
 │   └── config.json         # Reflection chain definitions (schedules, prompts)
@@ -107,7 +109,8 @@ claude_knowledge/
 │   └── note.html           # Jinja2 template for rendered HTML notes
 ├── scripts/
 │   └── backfill_pages.py   # One-off: render all existing notes to Pages
-├── com.user.obsidian-bridge.plist  # launchd daemon (edit paths, then install)
+├── com.user.obsidian-bridge.plist    # launchd daemon for the poller
+├── com.user.obsidian-reindex.plist   # launchd daemon for headless re-embedding
 ├── install_launchd.sh      # Substitutes paths and loads the plist
 ├── requirements.txt
 ├── .env.example
@@ -143,9 +146,31 @@ cp .env.example .env
 #          JINA_API_KEY, OBSIDIAN_VAULT_PATH
 ```
 
-### 5. Smart Connections (required for semantic search)
+### 5. Semantic index (headless re-embedding)
 
-Install the [Smart Connections](https://github.com/brianpetro/obsidian-smart-connections) Obsidian plugin and let it build embeddings. The bridge uses its `TaylorAI/bge-micro-v2` embeddings for the `/find` command and for linking related notes during note creation. The ONNX model (~20 MB) is downloaded automatically on first use.
+Semantic search (`/find`, `/ask`, and related-note linking) runs on a local
+`TaylorAI/bge-micro-v2` ONNX index that the bridge owns:
+`local/vault_index.json`, built by `local/reindex.py`. The same embed function
+serves both stored notes and live queries, so the two vector spaces match by
+construction. The ONNX model (~69 MB) downloads automatically on first use.
+
+```bash
+.venv/bin/python local/reindex.py          # incremental — only changed notes
+.venv/bin/python local/reindex.py --full    # re-embed the whole vault
+```
+
+`reindex.py` indexes curated markdown only — it skips `Attachments/`, `.trash`,
+`.smart-env`, and other hidden/system dirs, and notes under 200 chars. Each note
+is embedded as `title + body` (frontmatter stripped), truncated to the model's
+512-token window.
+
+> **Why not Smart Connections?** The original bridge read the [Smart
+> Connections](https://github.com/brianpetro/obsidian-smart-connections) plugin's
+> `.smart-env/` embeddings, but that plugin only re-embeds while Obsidian is open
+> on the desktop — so for a headless workflow the index goes stale. `reindex.py`
+> on a schedule (step 8) keeps it current with no Obsidian involvement.
+> `load_source_embeddings` still falls back to `.smart-env/*.ajson` if the
+> headless index is absent.
 
 ### 6. Test manually
 
@@ -221,17 +246,32 @@ Once configured, each new note is automatically rendered, committed, and pushed.
 
 **Security:** The repo is private. Pages are publicly accessible but URLs are 12-character random hex slugs with no index or listing page, plus `<meta name="robots" content="noindex, nofollow">` on every page.
 
-### 8. Install launchd daemon
+### 8. Install launchd daemons
+
+**Poller** (every 2 minutes, logs to `~/Library/Logs/obsidian-bridge.log`):
 
 ```bash
 bash install_launchd.sh
 ```
 
-Runs every 2 minutes. Logs to `~/Library/Logs/obsidian-bridge.log`.
+**Headless re-embedding** (every 15 minutes, logs to
+`~/Library/Logs/obsidian-reindex.log`) — keeps `vault_index.json` current so
+search works without opening Obsidian. Substitute paths in
+`com.user.obsidian-reindex.plist` (`REPLACE_WITH_VENV_PYTHON`,
+`REPLACE_WITH_ABSOLUTE_PATH`, `REPLACE_WITH_USERNAME`) into
+`~/Library/LaunchAgents/` and load it:
 
-To uninstall:
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
+sed -e "s|REPLACE_WITH_ABSOLUTE_PATH|$(pwd)|g" \
+    -e "s|REPLACE_WITH_USERNAME|$(whoami)|g" \
+    -e "s|REPLACE_WITH_VENV_PYTHON|$(pwd)/.venv/bin/python|g" \
+    com.user.obsidian-reindex.plist > ~/Library/LaunchAgents/com.user.obsidian-reindex.plist
+launchctl load ~/Library/LaunchAgents/com.user.obsidian-reindex.plist
+```
+
+To uninstall either daemon:
+```bash
+launchctl unload ~/Library/LaunchAgents/com.user.obsidian-bridge.plist   # or -reindex
 rm ~/Library/LaunchAgents/com.user.obsidian-bridge.plist
 ```
 

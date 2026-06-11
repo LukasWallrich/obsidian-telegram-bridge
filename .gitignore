@@ -7,3 +7,4 @@ local/models/
 __pycache__/
 *.pyc
 .DS_Store
+local/vault_index.json

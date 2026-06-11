@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.obsidian-reindex</string>
+
+    <!-- Headless re-embedding so the vault index stays current without Obsidian.
+         Uses the venv python (onnxruntime/tokenizers/numpy). Incremental: only
+         changed notes are embedded, so an unchanged run is near-instant. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>REPLACE_WITH_VENV_PYTHON</string>
+        <string>REPLACE_WITH_ABSOLUTE_PATH/local/reindex.py</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>900</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/REPLACE_WITH_USERNAME/Library/Logs/obsidian-reindex.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/REPLACE_WITH_USERNAME/Library/Logs/obsidian-reindex.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>REPLACE_WITH_ABSOLUTE_PATH</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/REPLACE_WITH_USERNAME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/REPLACE_WITH_USERNAME</string>
+    </dict>
+</dict>
+</plist>

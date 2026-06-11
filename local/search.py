@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).parent.parent
 MODEL_CACHE = BASE_DIR / "local" / "models"
+VAULT_INDEX_PATH = Path(__file__).parent / "vault_index.json"
+DEFAULT_MODEL = "TaylorAI/bge-micro-v2"
 
 # ---------------------------------------------------------------------------
 # AJSON parsing
@@ -57,20 +59,33 @@ def load_source_embeddings(vault_path: str) -> tuple[list[dict], str]:
     """
     vault = Path(vault_path)
     smart_env_config = vault / ".smart-env" / "smart_env.json"
-    if not smart_env_config.exists():
-        logger.warning("smart_env.json not found at %s", smart_env_config)
-        return [], ""
+    model_name = DEFAULT_MODEL
+    if smart_env_config.exists():
+        config = json.loads(smart_env_config.read_text())
+        model_name = (
+            config.get("smart_sources", {})
+            .get("embed_model", {})
+            .get("transformers", {})
+            .get("model_key", "")
+        ) or DEFAULT_MODEL
 
-    config = json.loads(smart_env_config.read_text())
-    model_name = (
-        config.get("smart_sources", {})
-        .get("embed_model", {})
-        .get("transformers", {})
-        .get("model_key", "")
-    )
-    if not model_name:
-        logger.warning("No embedding model_key found in smart_env.json")
-        return [], ""
+    # Prefer the headless index (reindex.py) — it is kept current on a schedule,
+    # so it works even though this user never opens Obsidian to let Smart
+    # Connections re-embed. Fall back to Smart Connections' .ajson otherwise.
+    if VAULT_INDEX_PATH.exists():
+        try:
+            data = json.loads(VAULT_INDEX_PATH.read_text())
+            notes = data.get("notes", {})
+            entries = [
+                {"path": p, "title": Path(p).stem, "vec": rec["vec"]}
+                for p, rec in notes.items()
+                if rec.get("vec") and rec.get("model") == model_name
+            ]
+            if entries:
+                logger.info("Loaded %d source embeddings from headless index", len(entries))
+                return entries, model_name
+        except (json.JSONDecodeError, KeyError, OSError):
+            logger.exception("Failed reading headless index — falling back to .ajson")
 
     multi_dir = vault / ".smart-env" / "multi"
     if not multi_dir.exists():
@@ -143,45 +158,52 @@ def ensure_onnx_model(model_name: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def embed_query(query: str, model_name: str) -> list[float]:
+_EMBEDDER_CACHE: dict = {}
+
+
+def get_embedder(model_name: str):
     """
-    Tokenize query and run ONNX inference to get a 384-dim embedding.
-    Uses mean pooling over token embeddings (matching bge-micro-v2 behaviour).
+    Return a cached callable embed(text) -> 384-dim vec for the given model.
+
+    The ONNX session and tokenizer are loaded once and reused, so the same
+    function embeds both stored notes (reindex.py) and live queries — keeping
+    the two vector spaces identical by construction (no pooling drift).
     """
+    if model_name in _EMBEDDER_CACHE:
+        return _EMBEDDER_CACHE[model_name]
+
     import numpy as np
     import onnxruntime as ort
     from tokenizers import Tokenizer
 
     model_dir = ensure_onnx_model(model_name)
-
     tokenizer = Tokenizer.from_file(str(model_dir / "tokenizer.json"))
     tokenizer.enable_truncation(max_length=512)
     tokenizer.enable_padding(length=512)
-
-    encoded = tokenizer.encode(query)
-    input_ids = np.array([encoded.ids], dtype=np.int64)
-    attention_mask = np.array([encoded.attention_mask], dtype=np.int64)
-    token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
-
     session = ort.InferenceSession(str(model_dir / "model.onnx"))
     input_names = {inp.name for inp in session.get_inputs()}
 
-    feeds = {"input_ids": input_ids, "attention_mask": attention_mask}
-    if "token_type_ids" in input_names:
-        feeds["token_type_ids"] = token_type_ids
+    def embed(text: str) -> list[float]:
+        encoded = tokenizer.encode(text)
+        input_ids = np.array([encoded.ids], dtype=np.int64)
+        attention_mask = np.array([encoded.attention_mask], dtype=np.int64)
+        feeds = {"input_ids": input_ids, "attention_mask": attention_mask}
+        if "token_type_ids" in input_names:
+            feeds["token_type_ids"] = np.zeros_like(input_ids, dtype=np.int64)
+        token_embeddings = session.run(None, feeds)[0]  # (1, seq, hidden)
+        # Mean pooling with attention mask (matches bge-micro-v2 behaviour)
+        mask = attention_mask[:, :, np.newaxis].astype(np.float32)
+        summed = (token_embeddings * mask).sum(axis=1)
+        count = mask.sum(axis=1).clip(min=1e-9)
+        return (summed / count)[0].tolist()
 
-    outputs = session.run(None, feeds)
-    # outputs[0] is token_embeddings: shape (1, seq_len, hidden_dim)
-    token_embeddings = outputs[0]
+    _EMBEDDER_CACHE[model_name] = embed
+    return embed
 
-    # Mean pooling with attention mask
-    mask_expanded = attention_mask[:, :, np.newaxis].astype(np.float32)
-    summed = (token_embeddings * mask_expanded).sum(axis=1)
-    count = mask_expanded.sum(axis=1).clip(min=1e-9)
-    mean_pooled = summed / count
 
-    vec = mean_pooled[0].tolist()
-    return vec
+def embed_query(query: str, model_name: str) -> list[float]:
+    """Embed a single query string (mean-pooled bge-micro-v2, 384-dim)."""
+    return get_embedder(model_name)(query)
 
 
 # ---------------------------------------------------------------------------
