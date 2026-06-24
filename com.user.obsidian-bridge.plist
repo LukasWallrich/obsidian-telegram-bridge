@@ -12,10 +12,15 @@
         <string>REPLACE_WITH_ABSOLUTE_PATH/local/poller.py</string>
     </array>
 
-    <key>StartInterval</key>
-    <integer>120</integer>
-
+    <!-- poller.py runs a long-lived internal loop (polls every 120s, sleeps
+         between). RunAtLoad starts it once at login; KeepAlive restarts it only
+         if it crashes/exits. Steady-state polling therefore never depends on
+         launchd repeatedly spawning new processes — which can silently stop
+         after long uptime / heavy sleep cycling while the agent stays loaded. -->
     <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
     <true/>
 
     <key>StandardOutPath</key>

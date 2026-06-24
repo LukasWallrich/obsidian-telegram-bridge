@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -68,11 +69,34 @@ _TODO_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 
-def acquire_lock() -> bool:
-    if LOCK_FILE.exists():
-        logger.info("Lock file exists — another instance is running. Exiting.")
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
         return False
-    LOCK_FILE.touch()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists but owned by another user
+    return True
+
+
+def acquire_lock() -> bool:
+    """Take the single-instance lock, reclaiming it if the holder is dead.
+
+    The lock records the holder's PID so an unclean exit (e.g. SIGKILL on
+    shutdown) cannot leave a stale lock that blocks every future start.
+    """
+    if LOCK_FILE.exists():
+        try:
+            holder = int(LOCK_FILE.read_text().strip() or "0")
+        except (ValueError, OSError):
+            holder = 0
+        if _pid_alive(holder):
+            logger.info("Lock held by running PID %d — exiting.", holder)
+            return False
+        logger.warning("Reclaiming stale lock (PID %s not running).", holder or "unknown")
+    LOCK_FILE.write_text(str(os.getpid()))
     return True
 
 
@@ -1005,13 +1029,45 @@ def run_poll() -> None:
     logger.info("State saved with last_offset=%s", last_offset)
 
 
+POLL_INTERVAL_SECONDS = 120
+
+_shutdown = False
+
+
+def _handle_signal(signum, _frame) -> None:
+    global _shutdown
+    _shutdown = True
+    logger.info("Received signal %d — finishing current cycle then exiting.", signum)
+
+
 def main() -> None:
+    # Long-lived loop by default; `--once` runs a single poll (manual/testing).
+    # The daemon stays resident so steady-state polling never depends on launchd
+    # repeatedly spawning new processes — which can silently stop after long
+    # uptime / heavy sleep cycling, even though the agent is still "loaded".
+    once = "--once" in sys.argv
     if not acquire_lock():
         sys.exit(0)
+    signal.signal(signal.SIGTERM, _handle_signal)
+    signal.signal(signal.SIGINT, _handle_signal)
     try:
-        run_poll()
+        if once:
+            run_poll()
+            return
+        logger.info("Starting long-lived poll loop (interval=%ds).", POLL_INTERVAL_SECONDS)
+        while not _shutdown:
+            try:
+                run_poll()
+            except Exception:
+                logger.exception("Poll cycle failed — continuing loop.")
+            # Sleep in 1s slices so a shutdown signal is acted on promptly.
+            for _ in range(POLL_INTERVAL_SECONDS):
+                if _shutdown:
+                    break
+                time.sleep(1)
     finally:
         release_lock()
+        logger.info("Poll loop stopped; lock released.")
 
 
 if __name__ == "__main__":
