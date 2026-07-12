@@ -472,7 +472,7 @@ def handle_reflect_command(
         return _cmd_pause(sub_args, chat_id, state, send_message_fn, resume=True)
 
     elif subcommand == "trigger":
-        return _cmd_trigger(sub_args, chat_id, state, send_message_fn)
+        return _cmd_trigger(sub_args, chat_id, state, send_message_fn, invoke_claude)
 
     elif subcommand == "skip":
         return _cmd_skip(chat_id, state, send_message_fn)
@@ -554,7 +554,7 @@ def _cmd_pause(sub_args: str, chat_id: int, state: dict, send_message_fn, resume
     return state
 
 
-def _cmd_trigger(sub_args: str, chat_id: int, state: dict, send_message_fn) -> dict:
+def _cmd_trigger(sub_args: str, chat_id: int, state: dict, send_message_fn, invoke_claude_fn=None) -> dict:
     chain_id = sub_args.strip()
     if not chain_id:
         send_message_fn(chat_id, "Usage: /reflect trigger <chain-id>")
@@ -567,7 +567,7 @@ def _cmd_trigger(sub_args: str, chat_id: int, state: dict, send_message_fn) -> d
 
     vault_path = str(settings.obsidian_vault_path)
     try:
-        send_reflection_prompt(chain, chat_id, vault_path, state, send_message_fn)
+        send_reflection_prompt(chain, chat_id, vault_path, state, send_message_fn, invoke_claude_fn=invoke_claude_fn)
         if "reflections_sent" not in state:
             state["reflections_sent"] = {}
         state["reflections_sent"][chain_id] = datetime.now().strftime("%Y-%m-%d")
