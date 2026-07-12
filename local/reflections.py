@@ -214,7 +214,7 @@ def match_pending_reflection(state: dict, reply_msg_id: int) -> dict | None:
     return None
 
 
-def expire_pending_reflections(state: dict, max_age_hours: int = 48) -> None:
+def expire_pending_reflections(state: dict, max_age_hours: int = 168) -> None:
     """Remove pending reflections older than max_age_hours from state."""
     pending = state.get("pending_reflections", {})
     cutoff = datetime.now() - timedelta(hours=max_age_hours)
