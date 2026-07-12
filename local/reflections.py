@@ -472,7 +472,7 @@ def handle_reflect_command(
         return _cmd_pause(sub_args, chat_id, state, send_message_fn, resume=True)
 
     elif subcommand == "trigger":
-        return _cmd_trigger(sub_args, chat_id, state, send_message_fn, invoke_claude)
+        return _cmd_trigger(sub_args, chat_id, state, send_message_fn, invoke_claude_fn)
 
     elif subcommand == "skip":
         return _cmd_skip(chat_id, state, send_message_fn)
