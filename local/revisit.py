@@ -225,51 +225,55 @@ def gather_revisit_context(
                 "title": r["title"],
                 "score": r["score"],
                 "takeaways": r_sections["takeaways"],
+                "online_url": _resolve_online_url(r["title"]),
             })
     except Exception:
         logger.exception("Failed to search for related notes")
 
-    # Generate connection synthesis via Claude Haiku
-    synthesis = ""
-    if related_notes and sections["takeaways"]:
-        synthesis = _generate_synthesis(
+    # Generate 2-3 questions / provocations via Claude Haiku
+    provocations = []
+    if sections["takeaways"] or related_notes:
+        provocations = _generate_provocations(
             note_title, sections["takeaways"], related_notes, invoke_claude_fn, vault_path
         )
-
-    # Resolve online URL if pages are configured
-    online_url = ""
-    if settings.pages_repo_path and settings.pages_base_url:
-        try:
-            from pages import SlugMap
-            slug_map = SlugMap(Path(settings.pages_repo_path))
-            slug = slug_map.resolve(note_title)
-            if slug:
-                online_url = f"{settings.pages_base_url.rstrip('/')}/{slug}.html"
-        except Exception:
-            pass
 
     return {
         "note_title": note_title,
         "why_saved": sections["why_saved"],
         "takeaways": sections["takeaways"],
         "related_notes": related_notes,
-        "synthesis": synthesis,
-        "online_url": online_url,
+        "provocations": provocations,
+        "online_url": _resolve_online_url(note_title),
     }
 
 
-def _generate_synthesis(
+def _resolve_online_url(title: str) -> str:
+    """Resolve a note's GitHub Pages URL, or '' if Pages isn't configured / no slug."""
+    if not (settings.pages_repo_path and settings.pages_base_url):
+        return ""
+    try:
+        from pages import SlugMap
+        slug_map = SlugMap(Path(settings.pages_repo_path))
+        slug = slug_map.resolve(title)
+        if slug:
+            return f"{settings.pages_base_url.rstrip('/')}/{slug}.html"
+    except Exception:
+        pass
+    return ""
+
+
+def _generate_provocations(
     title: str,
     takeaways: str,
     related_notes: list[dict],
     invoke_claude_fn,
     vault_path: str,
-) -> str:
-    """Generate a 4-5 sentence synthesis of how the note connects to related notes."""
-    template_path = PROMPTS_DIR / "revisit_synthesis_prompt.md"
+) -> list[str]:
+    """Generate 2-3 questions/provocations connecting the note to related notes."""
+    template_path = PROMPTS_DIR / "revisit_provocations_prompt.md"
     if not template_path.exists():
-        logger.warning("revisit_synthesis_prompt.md not found")
-        return ""
+        logger.warning("revisit_provocations_prompt.md not found")
+        return []
 
     template = template_path.read_text()
 
@@ -284,16 +288,23 @@ def _generate_synthesis(
     prompt = (
         template
         .replace("{title}", title)
-        .replace("{takeaways}", takeaways)
-        .replace("{related_notes_with_takeaways}", related_block)
+        .replace("{takeaways}", takeaways or "(No takeaways recorded)")
+        .replace("{related_notes_with_takeaways}", related_block or "(No related notes found)")
     )
 
     try:
         result = invoke_claude_fn(prompt, hash(title) & 0xFFFFFFFF, vault_path, model="claude-haiku-4-5-20251001")
-        return result.strip()
     except Exception:
-        logger.exception("Synthesis generation failed")
-        return ""
+        logger.exception("Provocation generation failed")
+        return []
+
+    # One question per non-empty line; strip any bullet/number prefix the model added.
+    questions = []
+    for line in result.strip().splitlines():
+        line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line.strip())
+        if line:
+            questions.append(line)
+    return questions[:3]
 
 
 # ---------------------------------------------------------------------------
@@ -317,16 +328,21 @@ def format_revisit_telegram_message(context: dict) -> str:
     if context["related_notes"]:
         lines.append("\nConnected notes:")
         for rn in context["related_notes"]:
-            lines.append(f"- [[{rn['title']}]]")
+            if rn.get("online_url"):
+                lines.append(f"- [[{rn['title']}]] — {rn['online_url']}")
+            else:
+                lines.append(f"- [[{rn['title']}]]")
 
-    if context["synthesis"]:
-        lines.append(f"\n{context['synthesis']}")
-
-    lines.append(
-        "\nHow has your thinking on this evolved? "
-        "What connections do you see to current work? "
-        "What would you explore further?"
-    )
+    if context.get("provocations"):
+        lines.append("\nQuestions to sit with:")
+        for i, q in enumerate(context["provocations"], 1):
+            lines.append(f"{i}. {q}")
+    else:
+        lines.append(
+            "\nHow has your thinking on this evolved? "
+            "What connections do you see to current work? "
+            "What would you explore further?"
+        )
     lines.append("\n(Reply to this message with text or a voice note)")
 
     return "\n".join(lines)
@@ -364,8 +380,10 @@ def gather_revisit_context_for_chain(
     context_parts = []
     if context.get("takeaways"):
         context_parts.append(context["takeaways"])
-    if context.get("synthesis"):
-        context_parts.append(f"\nConnection synthesis:\n{context['synthesis']}")
+    if context.get("provocations"):
+        context_parts.append(
+            "\nQuestions raised:\n" + "\n".join(f"- {q}" for q in context["provocations"])
+        )
     state["pending_revisit_context"] = "\n".join(context_parts)
 
     return format_revisit_telegram_message(context)
@@ -416,8 +434,10 @@ def handle_revisit_command(
     context_parts = []
     if context.get("takeaways"):
         context_parts.append(context["takeaways"])
-    if context.get("synthesis"):
-        context_parts.append(f"\nConnection synthesis:\n{context['synthesis']}")
+    if context.get("provocations"):
+        context_parts.append(
+            "\nQuestions raised:\n" + "\n".join(f"- {q}" for q in context["provocations"])
+        )
     context_str = "\n".join(context_parts)
 
     save_pending(state, chain_id, msg_id, context_str)
