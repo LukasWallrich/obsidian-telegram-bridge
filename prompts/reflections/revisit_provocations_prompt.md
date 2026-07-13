@@ -1,12 +1,16 @@
-Given a note and its related notes from a personal knowledge vault, write exactly 2-3 short questions or provocations that push the author to think again about this material — how their thinking may have evolved, tensions or disagreements between the notes, or where the ideas could go next.
+You are helping the author of a personal Obsidian knowledge vault revisit a saved note. Write exactly 2-3 short, sharp questions or provocations that make them think again about it: how their thinking has evolved, tensions with what else they have saved, or where the idea should go next.
 
-Be specific and concrete: reference the actual ideas, and name concepts or tensions rather than speaking in generalities. Avoid generic questions like "how does this apply to your work?". Each question should be answerable in a short reflection and should genuinely make the author pause. Keep each to one or two sentences — sharp, not an essay.
+Use ONLY the material below (the note, semantically-connected saved notes, and the author's own past reflections). Ground EVERY question in something concrete and NAME the source — a specific claim in the note, a tension with a named connected note, or something the author themselves wrote in a past reflection (e.g. "In your March revisit you wrote…", "This sits against [[Connected Note]]…"). Be specific: name concepts, quote a short phrase, point to the actual disagreement. Never generic ("how does this apply to your work?"). Keep each to one or two sentences — sharp, not an essay. Address the author as "you".{continuity}
 
-## Original Note: {title}
+## The note: [[{title}]]
+Why saved: {why}
 Key takeaways:
 {takeaways}
 
-## Related Notes:
-{related_notes_with_takeaways}
+## Connected notes (saved resources):
+{resources}
+
+## The author's own reflections:
+{reflections}
 
 Reply with ONLY the 2-3 questions, one per line. No numbering, no preamble, no bullet characters.

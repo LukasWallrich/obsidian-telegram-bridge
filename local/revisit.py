@@ -224,18 +224,18 @@ def gather_revisit_context(
             related_notes.append({
                 "title": r["title"],
                 "score": r["score"],
+                "path": r["path"],
                 "takeaways": r_sections["takeaways"],
                 "online_url": _resolve_online_url(r["title"]),
             })
     except Exception:
         logger.exception("Failed to search for related notes")
 
-    # Generate 2-3 questions / provocations via Claude Haiku
-    provocations = []
-    if sections["takeaways"] or related_notes:
-        provocations = _generate_provocations(
-            note_title, sections["takeaways"], related_notes, invoke_claude_fn, vault_path
-        )
+    # Generate 2-3 questions / provocations grounded in the note, connected
+    # resources, and the author's own past reflections (continuous reflection).
+    provocations = _generate_provocations(
+        note_title, sections, related_notes, invoke_claude_fn, vault_path
+    )
 
     return {
         "note_title": note_title,
@@ -262,38 +262,127 @@ def _resolve_online_url(title: str) -> str:
     return ""
 
 
+def _strip_frontmatter(text: str) -> str:
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            return text[end + 4:].strip()
+    return text.strip()
+
+
+def _read_body(vault_path: str, rel_path: str, limit: int | None = None) -> str:
+    """A note's body (frontmatter stripped). Whitespace-collapsed excerpt if `limit` set."""
+    try:
+        body = _strip_frontmatter(Path(vault_path).joinpath(rel_path).read_text(errors="ignore"))
+    except OSError:
+        return ""
+    if limit and len(body) > limit:
+        body = " ".join(body.split())[:limit]
+    return body
+
+
+def _own_revisits(vault_path: str, note_title: str) -> list[str]:
+    """Relative paths of past revisit reflections targeting this note, oldest first."""
+    revisit_dir = Path(vault_path) / settings.obsidian_reflections_folder / "revisits"
+    if not revisit_dir.exists():
+        return []
+    matches = []
+    for f in revisit_dir.glob("*.md"):
+        try:
+            head = f.read_text(errors="ignore")[:600]
+        except OSError:
+            continue
+        m = re.search(r"^revisited_note:\s*(.+)$", head, re.MULTILINE)
+        if m and note_title in m.group(1):
+            matches.append(f)
+    matches.sort(key=lambda p: p.name)  # date-prefixed filenames sort chronologically
+    return [str(p.relative_to(vault_path)) for p in matches]
+
+
 def _generate_provocations(
     title: str,
-    takeaways: str,
+    sections: dict,
     related_notes: list[dict],
     invoke_claude_fn,
     vault_path: str,
 ) -> list[str]:
-    """Generate 2-3 questions/provocations connecting the note to related notes."""
+    """
+    Generate 2-3 questions/provocations that push the author's *continuous* reflection
+    forward — grounded in the note, connected resource notes, and the author's own past
+    reflections (their full revisit history for this note, plus nearby reflections).
+
+    Context is bounded and semantic-search-selected; the model is given no vault-scanning
+    tools, so the prompt size grows only with the note's own revisit count (never the
+    whole vault). All past revisits are included in full — none are silently dropped.
+    """
     template_path = PROMPTS_DIR / "revisit_provocations_prompt.md"
     if not template_path.exists():
         logger.warning("revisit_provocations_prompt.md not found")
         return []
-
     template = template_path.read_text()
 
-    related_block = ""
+    # Connected resource notes — excerpts (these are long saved articles).
+    resources_block = ""
     for rn in related_notes:
-        related_block += f"\n### [[{rn['title']}]]\n"
-        if rn["takeaways"]:
-            related_block += f"{rn['takeaways']}\n"
-        else:
-            related_block += "(No takeaways available)\n"
+        url = rn.get("online_url")
+        link = f" ({url})" if url else ""
+        excerpt = _read_body(vault_path, rn["path"], limit=700) if rn.get("path") else rn.get("takeaways", "")
+        resources_block += f"\n### [[{rn['title']}]]{link}\n{excerpt or '(no content)'}\n"
+
+    # The author's own reflections: every past revisit of THIS note (full), plus the
+    # nearest related reflections (full). See docstring — nothing is dropped.
+    own = _own_revisits(vault_path, title)
+    if len(own) >= 5:
+        logger.info(
+            "Note '%s' has %d revisits — consider summarising older ones to bound context.",
+            title, len(own),
+        )
+
+    query = title + (" " + sections["takeaways"][:200] if sections.get("takeaways") else "")
+    related_reflections = []
+    try:
+        ref_prefix = str(settings.obsidian_reflections_folder) + "/"
+        hits = search_vault(query, vault_path, top_k=40)
+        related_reflections = [
+            r["path"] for r in hits
+            if r["path"].startswith(ref_prefix) and r["path"] not in own
+        ][:3]
+    except Exception:
+        logger.exception("Failed to search related reflections")
+
+    reflections_block = ""
+    continuity = ""
+    if own:
+        continuity = (
+            " The author has reflected on this note before — read their past revisit(s) and "
+            "push the reflection FORWARD from where they left off; do not re-ask what they have "
+            "already worked through."
+        )
+        reflections_block += "# Your previous revisit(s) of THIS note (full — build forward, don't repeat):\n"
+        for rel in own:
+            reflections_block += f"\n### {rel}\n{_read_body(vault_path, rel)}\n"
+    if related_reflections:
+        reflections_block += "\n# Other related reflections of yours (full):\n"
+        for rel in related_reflections:
+            reflections_block += f"\n### {rel}\n{_read_body(vault_path, rel)}\n"
+    if not reflections_block:
+        reflections_block = "(No past reflections found yet.)"
 
     prompt = (
         template
         .replace("{title}", title)
-        .replace("{takeaways}", takeaways or "(No takeaways recorded)")
-        .replace("{related_notes_with_takeaways}", related_block or "(No related notes found)")
+        .replace("{why}", sections.get("why_saved") or "(not recorded)")
+        .replace("{takeaways}", sections.get("takeaways") or "(none recorded)")
+        .replace("{resources}", resources_block or "(none found)")
+        .replace("{reflections}", reflections_block)
+        .replace("{continuity}", continuity)
     )
 
     try:
-        result = invoke_claude_fn(prompt, hash(title) & 0xFFFFFFFF, vault_path, model="claude-haiku-4-5-20251001")
+        result = invoke_claude_fn(
+            prompt, hash(title) & 0xFFFFFFFF, vault_path,
+            model="claude-opus-4-8", tools="",
+        )
     except Exception:
         logger.exception("Provocation generation failed")
         return []

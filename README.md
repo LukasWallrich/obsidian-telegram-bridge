@@ -63,7 +63,25 @@ Send a message starting with `todo:`, `to do:`, `task:`, or `reminder:` to appen
 
 ### Spaced-Repetition Revisits
 
-`/revisit` selects a note using spaced-repetition scheduling (intervals: 7d → 21d → 60d → 180d → 365d), shows its key takeaways alongside semantically related notes, and asks for your current thoughts. Your reply is saved as a reflection note. Also runs automatically on Tuesday and Thursday mornings.
+`/revisit` selects a note using spaced-repetition scheduling (intervals: 7d → 21d → 60d → 180d → 365d), shows its key takeaways alongside semantically related notes and **2–3 generated questions/provocations**, and asks for your current thoughts. Your reply is saved as a reflection note. Also runs automatically on Tuesday and Thursday mornings.
+
+The Telegram prompt shares GitHub Pages links for the note **and** every connected note, so anything can be opened on the phone.
+
+#### How the questions are generated (continuous-reflection pipeline)
+
+The provocations are written by an LLM (`claude --print`) from a **bounded, semantically-selected** context — never a scan of the whole vault, so it stays fast and cheap as the vault grows:
+
+- **The note itself** — "why saved" + key takeaways.
+- **Connected saved notes** — top 3 by embedding similarity, as excerpts.
+- **Your own past reflections** — *all* previous revisits of this same note (in full, so the model builds forward from where you left off rather than repeating), plus the 3 nearest related reflections (weekly-wins / week-ahead / recording-takeaways / other revisits), in full.
+
+The prompt instructs the model to ground every question in something concrete and name its source (a claim in the note, a tension with a connected note, or something *you* wrote in a past reflection). Tools are disabled (`--tools ""`) — the model reasons only over the curated context.
+
+Config (`local/revisit.py`):
+
+- **Model:** `claude-opus-4-8` (chosen over Haiku/Sonnet after side-by-side testing — sharper, more incisive questions and, for this single-shot use, faster and only twice a week so cost is negligible).
+- **Context growth:** bounded by the note's own revisit count. Every revisit is always included in full — none are dropped. When a note passes **5** revisits a log line flags it (`consider summarising older ones`); summarise-and-cache of old revisits is a planned optimisation for that case.
+- Prompt template: `prompts/reflections/revisit_provocations_prompt.md`.
 
 ### Scheduled Reflection Chains
 

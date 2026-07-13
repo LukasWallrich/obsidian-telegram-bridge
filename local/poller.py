@@ -738,16 +738,27 @@ def build_prompt(session: list[dict], resource_folder: str, vault_path: str) -> 
 # ---------------------------------------------------------------------------
 
 
-def invoke_claude(prompt: str, session_id: int, vault_path: str, model: str = "claude-sonnet-4-6") -> str:
-    """Write prompt to /tmp file, pipe to claude CLI, return stdout."""
+def invoke_claude(
+    prompt: str, session_id: int, vault_path: str,
+    model: str = "claude-sonnet-4-6", tools: str | None = None,
+) -> str:
+    """
+    Write prompt to /tmp file, pipe to claude CLI, return stdout.
+
+    `tools` maps to `claude --tools`: pass "" to disable all tools (a bounded,
+    single-shot completion with no vault scanning); leave None for the default toolset.
+    """
     tmp_path = Path(f"/tmp/bridge_prompt_{session_id}.md")
     try:
         tmp_path.write_text(prompt)
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)  # allow nested invocation from within a Claude Code session
+        cmd = ["claude", "--print", "--dangerously-skip-permissions", "--model", model]
+        if tools is not None:
+            cmd += ["--tools", tools]
         with open(tmp_path) as f:
             result = subprocess.run(
-                ["claude", "--print", "--dangerously-skip-permissions", "--model", model],
+                cmd,
                 stdin=f,
                 capture_output=True,
                 text=True,
