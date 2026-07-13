@@ -214,9 +214,15 @@ def gather_revisit_context(
 
     related_notes = []
     try:
-        results = search_vault(search_query, vault_path, top_k=6)
-        # Exclude the note itself
-        results = [r for r in results if r["title"] != note_title][:3]
+        results = search_vault(search_query, vault_path, top_k=12)
+        # Connected notes shown to the user are saved resources — exclude the note
+        # itself and anything in the Reflections/ folder (past revisits/reflections
+        # feed the generated questions separately, and have no Pages links).
+        ref_prefix = str(settings.obsidian_reflections_folder) + "/"
+        results = [
+            r for r in results
+            if r["title"] != note_title and not r["path"].startswith(ref_prefix)
+        ][:3]
 
         for r in results:
             r_path = Path(vault_path) / r["path"]
